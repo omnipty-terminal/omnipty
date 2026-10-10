@@ -11,6 +11,13 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- In bash, sending a grouped command or a loop to a file (`{ …; } > file`,
+  `for …; done > file`) no longer puts an invisible escape sequence at the
+  start of that file. The shell integration's "command started" signal now
+  goes straight to the terminal. zsh wasn't affected.
+
 ## [0.9.0] - 2026-10-10
 
 ### Changed

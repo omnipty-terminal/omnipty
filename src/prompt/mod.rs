@@ -417,13 +417,14 @@ pub fn generate_init_bash(prompt: &PromptConfig, style_prompt: bool, emit_cmdlin
     // history files let other shells' lines in — so the entry is only
     // trusted when it contains the command bash says it's about to run.
     // Strip the leading number and any control characters.
+    // Printed with __omnipty_mark, not printf: see its definition below.
     let command_start = if emit_cmdline {
         r#"local __c; __c=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)
     __c="${__c#"${__c%%[![:space:]]*}"}"; __c="${__c#*[[:space:]]}"; __c="${__c#"${__c%%[![:space:]]*}"}"
     [[ "$__c" == *"$BASH_COMMAND"* ]] || __c="$BASH_COMMAND"
-    printf '\033]133;C;cmdline=%s\033\\' "${__c//[[:cntrl:]]/ }""#
+    __omnipty_mark '\033]133;C;cmdline=%s\033\\' "${__c//[[:cntrl:]]/ }""#
     } else {
-        r#"printf '\033]133;C\033\\'"#
+        r#"__omnipty_mark '\033]133;C\033\\'"#
     };
     let widget_start = widget_command_start(emit_cmdline);
     format!(
@@ -474,6 +475,18 @@ for __omnipty_pc in "${{PROMPT_COMMAND[@]}}"; do
   __omnipty_original_prompt_commands+=("$__omnipty_pc")
 done
 unset __omnipty_pc PROMPT_COMMAND
+
+# Where the DEBUG trap's C marker goes. bash runs the trap after a compound
+# command's redirections are in place, so during `{{ ...; }} > file` (or a
+# loop redirected to a file) stdout is already that file, and a plain printf
+# put the marker at the top of it. /dev/tty is still the terminal. With no
+# controlling terminal (bash driven over pipes) there's nothing to protect,
+# so the marker stays on stdout.
+if {{ : >/dev/tty; }} 2>/dev/null; then
+  __omnipty_mark() {{ builtin printf "$@" >/dev/tty; }}
+else
+  __omnipty_mark() {{ builtin printf "$@"; }}
+fi
 
 # Note: this installs a DEBUG trap (the bash-preexec pattern) for OSC 133;C
 # and command timing; a pre-existing DEBUG trap would be replaced.
@@ -1328,6 +1341,87 @@ mod run_tests {
                 .iter()
                 .any(|m| m.kind == MarkerKind::CommandEnd { exit: Some(0) }),
             "{shell}: the run wasn't reported: {markers:?}"
+        );
+    }
+
+    /// bash runs its DEBUG trap after a compound command's redirections are
+    /// set up, so the C marker printed from it used to land in the file:
+    /// `{ printf 'plain\n'; } > out` wrote `ESC ]133;C…` ahead of "plain".
+    /// The file must hold only what the command wrote, and the marker must
+    /// still reach the terminal.
+    #[test]
+    fn bash_redirected_group_keeps_the_marker_out_of_the_file() {
+        for shell in ["/opt/homebrew/bin/bash", "/bin/bash"] {
+            if std::path::Path::new(shell).exists() {
+                redirected_group_scenario(shell);
+            }
+        }
+    }
+
+    fn redirected_group_scenario(shell: &str) {
+        let config = Config::default();
+        let integration = crate::prompt::integration::setup(&config, shell);
+        let args = integration
+            .args_override
+            .clone()
+            .unwrap_or_else(|| config.shell.args.clone());
+        let dir = std::env::temp_dir().join(format!(
+            "omnipty-redirect-{}-{}",
+            std::process::id(),
+            shell.replace('/', "_")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let size = TermSize {
+            columns: 100,
+            screen_lines: 24,
+            cell_width: 8.0,
+            cell_height: 16.0,
+            scale: 1.0,
+        };
+        let options = SessionOptions {
+            program: shell.to_string(),
+            args,
+            working_directory: Some(dir.clone()),
+            scrollback: 100,
+            env: {
+                let mut e = integration.env.clone();
+                e.insert("HISTFILE".into(), "/dev/null".into());
+                e
+            },
+            images: true,
+        };
+        let (session, mut rx) = TerminalSession::spawn(options, size).expect("spawn bash");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match rx.try_recv() {
+                Ok(SessionEvent::Marker(m)) if m.kind == MarkerKind::PromptStart => break,
+                Ok(_) => continue,
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "{shell}: no prompt marker");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        // Typed at the prompt, not sent through the run widget: the DEBUG
+        // trap is what marks typed lines. The echo's arithmetic keeps the
+        // typed text from satisfying the wait.
+        session.write_input(b"{ printf 'plain\\n'; } > out.txt; echo GROUP_$((40+2))\r".to_vec());
+        wait_for(&session, "GROUP_42", &format!("{shell}: the redirected group never ran"));
+
+        let written = std::fs::read(dir.join("out.txt")).unwrap();
+        let markers = drain_markers(&mut rx);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            String::from_utf8_lossy(&written),
+            "plain\n",
+            "{shell}: the file got more than the command wrote"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::CommandStart { .. })),
+            "{shell}: the C marker never reached the terminal: {markers:?}"
         );
     }
 
