@@ -11,6 +11,11 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Verified
+
+- OmniPTY has been officially verified to work natively an Xorg session under LXQT. ([(#8)](https://github.com/omnipty-terminal/omnipty/pull/8),
+  thanks [@agustux](https://github.com/agustux) for contributing!)
+
 ### Fixed
 
 - In bash, sending a grouped command or a loop to a file (`{ …; } > file`,
@@ -162,7 +167,7 @@ write for users: what changed and why it matters, not which files moved.
 
 - `bell = "sound"` now plays the system bell sound on Linux, through
   `canberra-gtk-play` or `paplay`. With neither installed, it falls back to
-  the visual flash. ([(#4)](https://github.com/oxide-terminal/oxide/pull/4), 
+  the visual flash. ([(#4)](https://github.com/oxide-terminal/oxide/pull/4),
   thanks [@agustux](https://github.com/agustux) for contributing!)
 - Dragging a file or directory in the file tree scrolls the tree when the
   drag nears its top or bottom edge, so a destination that's out of view is
