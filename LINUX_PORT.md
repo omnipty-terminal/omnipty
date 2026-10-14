@@ -1,9 +1,10 @@
 # Linux Port
 
-**Status (2026-09-22): ported.** OmniPTY builds, links, passes its test suite
+**Status (2026-10-13): ported.** OmniPTY builds, links, passes its test suite
 and runs on Linux (Wayland, Vulkan). The `linux-port` branch carries the
 work; this file is now the record of what was done, what was verified on
-real hardware, and what is still open. The original plan's phases are kept
+real hardware, and what is still open. Native Xorg support has also been
+smoke-tested successfully under LXQt. The original plan's phases are kept
 as headings so the decisions stay traceable.
 
 Target machine: an Arch-based **Omarchy 4** desktop — Hyprland (Wayland),
@@ -99,11 +100,9 @@ to another window):
       workspace with a startup command)
 - [ ] closing the last window (`ctrl-shift-w` on the last pane) exits the
       process
-- [ ] **X11**: `WAYLAND_DISPLAY= omnipty` on this box starts, spawns the
-      shell and runs its event loop, but no XWayland window ever appears
-      (no `_NET_CLIENT_LIST` entry, nothing on stderr). Not chased further —
-      Wayland is the target here. Worth a look on a real Xorg session
-      before advertising X11.
+- [x] **X11**: Tested on a native Xorg session under LXQT. WAYLAND_DISPLAY= omnipty
+      successfully creates and renders a window, spawns the shell, and runs
+      normally. No X11-specific issues observed during testing.
 - [ ] resize storms with `htop` running (SIGWINCH debounce)
 - [ ] config live-reload (inotify)
 
@@ -144,7 +143,7 @@ to another window):
   first pane runs the command with no shell integration, and
   `assets/linux/omnipty.desktop` declares `X-TerminalArgExec` /
   `X-TerminalArgAppId`. Pinned workspaces are not restored for a `-e` launch.
-- **X11** (above).
+- ~~**X11** (above).~~
 - ~~**`bell = "sound"`** on Linux: XDG sound theme / PipeWire, if anyone
   asks.~~ Done: `canberra-gtk-play` plays the XDG theme's bell sound,
   falling back to `paplay` on the stock freedesktop sound if libcanberra's
