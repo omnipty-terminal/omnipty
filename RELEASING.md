@@ -59,7 +59,10 @@ This runs `dmg.sh` (sign, notarize, staple), then:
    `releases/<version>.json` copy for rollbacks;
 5. refreshes `omnipty/latest/OmniPTY.dmg`, the one object that changes in place:
    it's what the website's download links point at, so they never go stale;
-6. bumps the Homebrew cask and regenerates the site changelog.
+6. bumps the Homebrew cask and regenerates the site changelog;
+7. waits for the new changelog page to go live, then pings IndexNow
+   (`site/scripts/indexnow.py`) so Bing recrawls it. A slow deploy or a
+   rejected ping only prints a warning with the command to rerun.
 
 It refuses to run if the changelog section is missing or empty, so a
 forgotten changelog rename fails before the slow build starts, and likewise
