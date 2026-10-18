@@ -11,6 +11,8 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-18
+
 ### Verified
 
 - OmniPTY has been officially verified to work natively an Xorg session under LXQT. ([(#8)](https://github.com/omnipty-terminal/omnipty/pull/8),
