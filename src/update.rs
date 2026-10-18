@@ -88,10 +88,17 @@ pub fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
         200 => {}
         // No manifest published yet — not an error.
         404 => return Ok(None),
-        s => return Err(format!("update check failed: server said {s}")),
+        // The manifest is ours: anything else is a release or hosting
+        // problem, not the user's network.
+        s => {
+            crate::telemetry::report("update manifest HTTP error", s);
+            return Err(format!("update check failed: server said {s}"));
+        }
     }
-    let json: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| format!("update check failed: {e}"))?;
+    let json: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        crate::telemetry::report("update manifest unreadable", &e);
+        format!("update check failed: {e}")
+    })?;
     Ok(parse_manifest(
         &json,
         std::env::consts::OS,
@@ -227,10 +234,10 @@ fn updates_dir() -> Option<PathBuf> {
 /// have been damaged) and fetched again if it fails.
 #[cfg(target_os = "macos")]
 pub fn download(info: &ReleaseInfo) -> Result<PathBuf, String> {
-    let signature = info
-        .signature
-        .as_deref()
-        .ok_or("update rejected: no signature")?;
+    let Some(signature) = info.signature.as_deref() else {
+        crate::telemetry::report("update signature rejected", "no signature in the manifest");
+        return Err("update rejected: no signature".into());
+    };
     let comment = signed_comment(&info.version, std::env::consts::ARCH);
     let verify = |path: &Path| verify_signature(path, UPDATE_PUBLIC_KEY, signature, &comment);
 
@@ -251,14 +258,51 @@ pub fn download(info: &ReleaseInfo) -> Result<PathBuf, String> {
         .map_err(|e| format!("download failed: {e}"))?;
     if !status.success() {
         let _ = std::fs::remove_file(&partial);
+        // The check just succeeded, so this is most likely a missing or
+        // misnamed DMG, not the user's network.
+        crate::telemetry::report(
+            "update download failed",
+            format_args!("curl exit {:?}", status.code()),
+        );
         return Err("update download failed".into());
     }
+    // A fresh download that fails its signature is a broken release or a
+    // tampered one. Either way, hear about it before users do.
     if let Err(e) = verify(&partial) {
         let _ = std::fs::remove_file(&partial);
+        crate::telemetry::report("update signature rejected", &e);
         return Err(e);
     }
     std::fs::rename(&partial, &dest).map_err(|e| format!("download failed: {e}"))?;
     Ok(dest)
+}
+
+/// Called just before quitting into the installer script. The install runs
+/// in a detached shell after OmniPTY quits, so its failures are invisible:
+/// this leaves a marker for `check_install_attempt` at the next launch.
+#[cfg(target_os = "macos")]
+pub fn note_install_attempt(version: &str) {
+    let _ = std::fs::write(
+        crate::paths::cache_dir().join("pending_update.txt"),
+        version,
+    );
+}
+
+/// At launch: did the last install attempt take?
+#[cfg(target_os = "macos")]
+pub fn check_install_attempt() {
+    let path = crate::paths::cache_dir().join("pending_update.txt");
+    let Ok(target) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&path);
+    let current = env!("CARGO_PKG_VERSION");
+    if target.trim() != current {
+        crate::telemetry::report(
+            "update didn't install",
+            format_args!("still {current}, wanted {}", target.trim()),
+        );
+    }
 }
 
 /// The .app bundle this process is running from, if any.

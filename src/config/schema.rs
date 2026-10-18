@@ -26,6 +26,23 @@ pub struct Config {
     pub workspaces: WorkspacesConfig,
     pub markdown: MarkdownConfig,
     pub images: ImagesConfig,
+    pub crash_reports: CrashReportsConfig,
+}
+
+/// Crash reports sent to the OmniPTY developer through Sentry: the stack
+/// trace, version and OS. Never anything shown in or typed into a terminal.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CrashReportsConfig {
+    /// Read at launch. Turning it off in a live reload stops a running copy;
+    /// turning it back on waits for the next launch.
+    pub enabled: bool,
+}
+
+impl Default for CrashReportsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Inline images: the pictures programs send with the kitty, iTerm2 and

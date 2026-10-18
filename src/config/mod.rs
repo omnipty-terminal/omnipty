@@ -264,6 +264,10 @@ run_startup_commands = true   # re-run each pane's saved startup command when a 
                               # or hold shift while OmniPTY launches)
 startup_timeout      = "5s"   # give up on a pane's command if its shell isn't ready by then
 
+[crash_reports]
+enabled = true                # when OmniPTY crashes, send the developer the stack trace,
+                              # version and OS — never anything in your terminal
+
 # [keymap]                    # keystroke = "action id"; see the keybindings docs
 # "cmd-shift-p" = "app::palette"
 # "cmd-d"       = ""          # unbind a default

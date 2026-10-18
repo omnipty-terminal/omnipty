@@ -46,7 +46,9 @@ Two reasons this is one commit of its own:
 ./scripts/release.sh
 ```
 
-This runs `dmg.sh` (sign, notarize, staple), then:
+This runs `dmg.sh` (sign, notarize, staple; it compiles the crash-report DSN
+from `~/.config/omnipty-release/sentry.env` into the binary and refuses to
+build without one, `NO_SENTRY=1` to override), then:
 
 1. signs the update DMG with the minisign key (`~/.config/omnipty-release/update.key`,
    or `$UPDATE_KEY`), once per architecture in the binary;
@@ -231,6 +233,8 @@ One-time setup on the Linux box:
 - `pacman -S minisign jq`, and a copy of the signing key at
   `~/.config/omnipty-release/update.key` (or `UPDATE_KEY=…`). It's the same key
   as on the Mac — copy it over `scp`, never through a repo.
+- A copy of `~/.config/omnipty-release/sentry.env` (see "Crash reports"
+  below): `release-linux.sh` won't build without it either.
 - Node, then `npx wrangler login` (the browser step works over SSH by pasting
   the URL it prints). Set `CLOUDFLARE_ACCOUNT_ID` if `npx wrangler whoami`
   lists more than one account.
@@ -273,6 +277,29 @@ Copies older than the manifest switch still read GitHub, which is one reason
 the release is mirrored there.
 
 Nothing else to do on the publishing side.
+
+## Crash reports
+
+Release builds carry the Sentry DSN (`src/telemetry.rs` reads it from
+`OMNIPTY_SENTRY_DSN` at compile time; `cargo run`, CI and forks build without
+one and send nothing). `dmg.sh` and `release-linux.sh` load it from
+`~/.config/omnipty-release/sentry.env` on each machine, `chmod 600`:
+
+```sh
+# Compiled into release builds by dmg.sh and release-linux.sh.
+export OMNIPTY_SENTRY_DSN="https://<key>@o<org>.ingest.us.sentry.io/<project>"
+```
+
+The DSN is under Project Settings → Client Keys (DSN) in Sentry. It isn't a
+secret (it can only submit events, and `strings` finds it in any shipped
+binary), but it stays out of the repo so forks and dev builds don't report
+into the project. Don't export it in your shell profile: every local
+`cargo build --release` would then report as `production`. If it's ever
+abused, rotate it in Sentry and ship a release.
+
+Both scripts check the DSN made it into the binary. `NO_SENTRY=1` builds a
+release without crash reports. The full design, including the readable
+stack traces still to do, is in `support/SENTRY_PLAN.md`.
 
 ## Publishing to downloads.omnipty.com
 

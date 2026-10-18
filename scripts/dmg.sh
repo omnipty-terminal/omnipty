@@ -31,6 +31,22 @@ if [[ "$LOCK_VERSION" != "$VERSION" ]]; then
   echo "       Run 'cargo check' to refresh the lock, then amend your release commit." >&2
   exit 1
 fi
+# Crash reports: the DSN is compiled in from the environment
+# (support/SENTRY_PLAN.md). A release without one would ship silent.
+SENTRY_ENV="${SENTRY_ENV:-$HOME/.config/omnipty-release/sentry.env}"
+if [[ -f "$SENTRY_ENV" ]]; then
+  # shellcheck source=/dev/null
+  source "$SENTRY_ENV"
+fi
+if [[ -n "${NO_SENTRY:-}" ]]; then
+  unset OMNIPTY_SENTRY_DSN
+elif [[ -z "${OMNIPTY_SENTRY_DSN:-}" ]]; then
+  echo "error: OMNIPTY_SENTRY_DSN isn't set (looked in $SENTRY_ENV)." >&2
+  echo "       Re-run with NO_SENTRY=1 to build without crash reports." >&2
+  exit 1
+else
+  export OMNIPTY_SENTRY_DSN
+fi
 DMG="target/OmniPTY-${VERSION}.dmg"
 NOTARY_PROFILE="${NOTARY_PROFILE:-omnipty-notary}"
 
@@ -54,6 +70,10 @@ fi
 
 echo "==> building and signing with: $SIGN_ID"
 SIGN_ID="$SIGN_ID" ./scripts/bundle.sh
+if [[ -n "${OMNIPTY_SENTRY_DSN:-}" ]] && ! grep -qaF "$OMNIPTY_SENTRY_DSN" target/release/omnipty; then
+  echo "error: the DSN didn't make it into target/release/omnipty." >&2
+  exit 1
+fi
 
 echo "==> notarizing the app"
 ditto -c -k --keepParent target/OmniPTY.app target/OmniPTY-notarize.zip

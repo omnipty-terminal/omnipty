@@ -853,6 +853,7 @@ impl OmniPTY {
         }
         if let Some(previous) = crate::update::note_launch_version() {
             let current = env!("CARGO_PKG_VERSION");
+            crate::telemetry::updated(&previous, current);
             // Long enough to read after the window settles, then gone:
             // What's New stays in the Help menu.
             let id = this.push_toast(
@@ -862,6 +863,19 @@ impl OmniPTY {
                 false,
             );
             this.expire_toast(id, 20, cx);
+        }
+        if let Some(report) = crate::telemetry::crash_notice() {
+            let id = this.push_toast(
+                ToastKind::Info,
+                format!(
+                    "OmniPTY quit unexpectedly last time. Crash report {} was sent; \
+                     Help → Report an Issue will include it.",
+                    report.get(..8).unwrap_or(report)
+                ),
+                false,
+                false,
+            );
+            this.expire_toast(id, 30, cx);
         }
         this.refresh_git_status(cx);
 
@@ -1009,10 +1023,11 @@ impl OmniPTY {
             cx.open_url(url);
         }
         #[cfg(target_os = "macos")]
-        if let UpdateState::Ready { dmg, .. } = &self.update {
+        if let UpdateState::Ready { dmg, version } = &self.update {
             match crate::update::install_and_restart(dmg) {
                 Ok(()) => {
                     if crate::update::installed_bundle().is_some() {
+                        crate::update::note_install_attempt(version);
                         cx.quit();
                     } else {
                         self.toast(
@@ -1780,6 +1795,9 @@ impl OmniPTY {
                 if new_config.tree.width != self.config.tree.width {
                     self.drawer_width = None;
                     self.write_window_state();
+                }
+                if self.config.crash_reports.enabled && !new_config.crash_reports.enabled {
+                    crate::telemetry::disable();
                 }
                 self.config = Rc::new(new_config);
                 self.run_startup_commands =
@@ -5130,7 +5148,12 @@ impl OmniPTY {
     ) {
         if restore {
             let run = self.run_startup_commands;
-            for saved in crate::workspaces::load() {
+            let pinned = crate::workspaces::load();
+            crate::telemetry::breadcrumb(
+                "workspaces",
+                format!("restoring {} pinned", pinned.len()),
+            );
+            for saved in pinned {
                 let mut tabs = Vec::new();
                 for st in &saved.tabs {
                     let layout = st

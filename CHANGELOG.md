@@ -11,6 +11,21 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Crash reports.** When OmniPTY crashes, it now sends the developer the
+  stack trace, the OmniPTY version, and the OS version, so crashes on other
+  people's machines get fixed instead of going unnoticed. A handful of
+  failures that used to vanish silently are counted the same way: a shell
+  that won't start, a `workspaces.json` that won't parse, an update that
+  doesn't install. A report never contains anything shown in or typed into
+  a terminal: no output, commands, paths, directories, environment, or
+  workspace and tab names, and no hostname, user ID, or IP address. Your home
+  directory is replaced with `~` wherever it might appear. Reports go to
+  Sentry. To turn them off, set `[crash_reports] enabled = false` in the
+  config; it takes effect on save. After a crash, the next launch shows the
+  report's ID, and Help → Report an Issue pre-fills it into the new issue.
+
 ## [0.9.1] - 2026-10-18
 
 ### Verified
@@ -20,6 +35,13 @@ write for users: what changed and why it matters, not which files moved.
 
 ### Fixed
 
+- On Linux, a command that printed and exited in the same instant (`exit 3`
+  right after an error message, `omnipty -e <cmd>`, a workspace startup
+  command) could leave its pane stuck on the dead shell's last screen, with
+  no "[process exited]" overlay and no way to close it. The last line of
+  output could be lost the same way, on both platforms. Both are fixed: the
+  output is read before the exit is announced, and the hangup is treated as
+  the end of the output, not as an error.
 - In bash, sending a grouped command or a loop to a file (`{ …; } > file`,
   `for …; done > file`) no longer puts an invisible escape sequence at the
   start of that file. The shell integration's "command started" signal now

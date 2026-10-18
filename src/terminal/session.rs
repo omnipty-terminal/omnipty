@@ -346,6 +346,49 @@ mod tests {
         text
     }
 
+    /// A shell that prints and exits at once: on Linux the master's read
+    /// fails with EIO (the hangup) in the same wakeup as that last output,
+    /// and the SIGCHLD can land before the output is read. Either way the
+    /// output must reach the grid and the exit status must reach the pane;
+    /// a pane that never gets `ChildExit` neither closes nor shows its
+    /// "[process exited]" overlay.
+    #[test]
+    fn exit_delivers_last_output_and_status() {
+        let size = TermSize {
+            columns: 80,
+            screen_lines: 24,
+            cell_width: 8.0,
+            cell_height: 16.0,
+            scale: 1.0,
+        };
+        for run in 0..50 {
+            let options = SessionOptions {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf last_words; exit 3".into()],
+                working_directory: None,
+                scrollback: 100,
+                env: HashMap::new(),
+                images: false,
+            };
+            let (session, mut rx) = TerminalSession::spawn(options, size).expect("spawn sh");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut status = None;
+            while status.is_none() && Instant::now() < deadline {
+                while let Ok(event) = rx.try_recv() {
+                    if let SessionEvent::Term(AlacEvent::ChildExit(exit)) = event {
+                        status = Some(exit.code());
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(status, Some(Some(3)), "run {run}: no exit status");
+            assert!(
+                visible_text(&session).contains("last_words"),
+                "run {run}: last output lost"
+            );
+        }
+    }
+
     /// The event loop splits parser slices at OSC 133 markers: a real zsh
     /// with the integration installed must deliver `CommandEnd { exit: 1 }`
     /// for `false`, with exact rows, and a non-integrated shell must deliver

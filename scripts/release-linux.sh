@@ -67,6 +67,23 @@ if [[ -z "${NO_UPLOAD:-}" ]]; then
   }
 fi
 
+# Crash reports: the DSN is compiled in from the environment
+# (support/SENTRY_PLAN.md). A release without one would ship silent.
+SENTRY_ENV="${SENTRY_ENV:-$HOME/.config/omnipty-release/sentry.env}"
+if [[ -f "$SENTRY_ENV" ]]; then
+  # shellcheck source=/dev/null
+  source "$SENTRY_ENV"
+fi
+if [[ -n "${NO_SENTRY:-}" ]]; then
+  unset OMNIPTY_SENTRY_DSN
+elif [[ -z "${OMNIPTY_SENTRY_DSN:-}" ]]; then
+  echo "error: OMNIPTY_SENTRY_DSN isn't set (looked in $SENTRY_ENV)." >&2
+  echo "       Re-run with NO_SENTRY=1 to build without crash reports." >&2
+  exit 1
+else
+  export OMNIPTY_SENTRY_DSN
+fi
+
 # Size of an object as served through the custom domain, or empty if it isn't
 # there. The query string keeps this off Cloudflare's cache: a plain request
 # for a missing object caches the 404 for minutes, which would then hide the
