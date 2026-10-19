@@ -89,6 +89,24 @@ feature plus [configuration](https://omnipty.com/docs/configuration/),
 [honest comparison](https://omnipty.com/compare/) with iTerm2, Ghostty, kitty, WezTerm,
 Alacritty, and Warp.
 
+## Roadmap/Goals
+
+OmniPTY is already packed with features that developers typically tack on.
+
+This short roadmap and goals list serves as the next steps to making OmniPTY even better and reach more developers
+while simultaneously catching potential errors instantly as they occur and release a fix.
+
+| # | Goal | Status |
+| :-: | ----------------------------------------------------- | :----: |
+| 1 | Rename to OmniPTY | ✅ |
+| 2 | Add Sentry for Error/Crash reporting | 🛠️ |
+| 3 | Global workspace/tab/pane name search and jump-to | ❌ |
+| 4 | Windows port | ❌ |
+
+As OmniPTY grows, so will this list. It is also non-inclusive, so there may be smaller feature adds and fixes not listed here.
+
+If you have any feature requests, see the feature requests section.
+
 ## Contributing
 
 Pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers getting a build
