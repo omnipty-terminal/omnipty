@@ -50,8 +50,25 @@ cargo test         # run the test suite
 The first build compiles GPUI, which takes a few minutes. A `cargo run` binary is a debug
 build, fine for iterating on a change, but full-screen programs like nvim will feel
 sluggish in it, since an unoptimized GPUI redraw doesn't fit in a 60 Hz frame. It also
-never checks for updates and isn't a real app bundle on macOS. See the
-[README](README.md#build-from-source) for the release-build scripts if you need one.
+never checks for updates and isn't a real app bundle on macOS. The
+[install docs](https://omnipty.com/docs/install/#source) cover the release-build scripts
+if you need one.
+
+## How it's put together
+
+One binary crate. The PTY reader/parser runs on its own thread
+(`alacritty_terminal`'s event loop) and mutates a shared `Term` behind a mutex;
+the GPUI main thread briefly locks it during paint to copy the visible grid out,
+then shapes and paints batched text runs directly — no per-cell elements.
+An image is text as far as the grid is concerned — placeholder cells written where the
+picture goes, each naming its slice — so scrollback, reflow, and clears need no special
+cases; the pixels are decoded on the background pool and drawn under the text.
+Directory scans, git queries, and file watching run on the background pool.
+The tree follows `cd` by polling the PTY's foreground process group cwd
+(`tcgetpgrp` + `proc_pidinfo` on macOS, `/proc/<pid>/cwd` on Linux), so it works
+with zero shell cooperation. Platform differences are confined to a handful of
+`cfg` sites: the process lookups, notifications (`UNUserNotificationCenter` /
+`notify-send`), the updater, the keymap tables, and the window chrome.
 
 ## Making a change
 
@@ -89,8 +106,9 @@ doesn't apply; just say which ones you skipped in the PR description.
   to add `Contributed by <Github Username>` at the end of the entry description so you
   are credited in the release notes for your contribution.
 
-- **`README.md`**: update the feature list, install instructions, or any keybinding/config
-  table the change affects.
+- **`README.md`**: it's kept short on purpose, so only touch it if the change alters the
+  install steps or is big enough to join the "What sets it apart" list. Keys, config
+  options, and per-feature detail live on the website.
 
 - **Default config**: a new or changed config option needs to be added in both
   `src/config/schema.rs` (the field and its default) and the commented template in
