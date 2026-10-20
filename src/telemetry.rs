@@ -16,7 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use sentry::Hub;
-use sentry::protocol::{Breadcrumb, Event, Level};
+use sentry::protocol::{Breadcrumb, Event, Level, Stacktrace};
 
 use crate::config::Config;
 
@@ -212,10 +212,31 @@ fn scrub_event(event: &mut Event<'static>) {
         if let Some(value) = &mut exception.value {
             *value = scrub(value);
         }
+        scrub_frames(exception.stacktrace.as_mut());
+        scrub_frames(exception.raw_stacktrace.as_mut());
     }
+    for thread in &mut event.threads.values {
+        scrub_frames(thread.stacktrace.as_mut());
+        scrub_frames(thread.raw_stacktrace.as_mut());
+    }
+    scrub_frames(event.stacktrace.as_mut());
     for crumb in &mut event.breadcrumbs.values {
         if let Some(message) = &mut crumb.message {
             *message = scrub(message);
+        }
+    }
+}
+
+/// A dev build's frames carry the source files' absolute paths, and the
+/// cargo registry and rustup toolchain live under the home directory.
+/// (Release builds have no debug info, so their frames carry no paths.)
+fn scrub_frames(trace: Option<&mut Stacktrace>) {
+    for frame in trace.into_iter().flat_map(|t| &mut t.frames) {
+        if let Some(path) = &mut frame.abs_path {
+            *path = scrub(path);
+        }
+        if let Some(path) = &mut frame.filename {
+            *path = scrub(path);
         }
     }
 }
@@ -244,6 +265,45 @@ mod tests {
         // The real thing: no panic, no client, twice in a row.
         report_once("test label", "detail");
         report_once("test label", "detail");
+    }
+
+    /// A first test event showed the home directory 40 times, every one of
+    /// them in a frame's `abs_path`, which the message scrub never saw.
+    #[test]
+    fn scrub_reaches_stack_frame_paths() {
+        use sentry::protocol::{Exception, Frame};
+        // Only `init` sets HOME; tests share the process, so set it once
+        // and read back whatever is there.
+        let _ = HOME.set("/Users/alice".into());
+        let home = HOME.get().unwrap().clone();
+        let mut event = Event {
+            message: Some(format!("panicked at {home}/src/main.rs:1")),
+            ..Default::default()
+        };
+        event.exception.values.push(Exception {
+            value: Some(format!("no such file: {home}/x")),
+            stacktrace: Some(Stacktrace {
+                frames: vec![Frame {
+                    abs_path: Some(format!("{home}/.cargo/registry/src/gpui/app.rs")),
+                    filename: Some("app.rs".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        scrub_event(&mut event);
+        assert_eq!(
+            event.message.as_deref(),
+            Some("panicked at ~/src/main.rs:1")
+        );
+        let exception = &event.exception.values[0];
+        assert_eq!(exception.value.as_deref(), Some("no such file: ~/x"));
+        let frame = &exception.stacktrace.as_ref().unwrap().frames[0];
+        assert_eq!(
+            frame.abs_path.as_deref(),
+            Some("~/.cargo/registry/src/gpui/app.rs")
+        );
     }
 
     #[test]

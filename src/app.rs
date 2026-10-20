@@ -2308,7 +2308,8 @@ impl OmniPTY {
             }
             TreeEvent::ChangedRoot(path) | TreeEvent::CdShell(path) => {
                 let path = path.clone();
-                self.active_pane().update(cx, |t, cx| t.request_cd(&path, cx));
+                self.active_pane()
+                    .update(cx, |t, cx| t.request_cd(&path, cx));
             }
             TreeEvent::RootChanged(root) => {
                 let root = root.clone();
@@ -3039,9 +3040,11 @@ impl OmniPTY {
                                     .child("▸"),
                             )
                             .child(match (row.command.text.is_empty(), is_selected) {
-                                (_, true) => {
-                                    self.render_line_edit(&row.command, "nothing — just a shell", cx)
-                                }
+                                (_, true) => self.render_line_edit(
+                                    &row.command,
+                                    "nothing — just a shell",
+                                    cx,
+                                ),
                                 (true, false) => {
                                     div().flex_1().text_color(dim).child("just a shell")
                                 }
