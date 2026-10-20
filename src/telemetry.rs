@@ -173,12 +173,21 @@ pub fn crash_notice() -> Option<&'static str> {
     PREVIOUS_CRASH.get()?.as_deref()
 }
 
-/// Help → Report an Issue. After a crash, the new issue's body names the
-/// report, so the GitHub issue and the Sentry event find each other.
+/// Help → Report an Issue. After a crash, the bug-report form's "Crash
+/// report ID" field is filled in, so the GitHub issue and the Sentry event
+/// find each other. Without one, the plain page: GitHub shows its template
+/// chooser.
 pub fn issue_url() -> String {
+    issue_url_for(PREVIOUS_CRASH.get().and_then(|id| id.as_deref()))
+}
+
+/// omnipty.com/issues/new redirects to GitHub keeping the query string, and
+/// GitHub prefills an issue form's fields from parameters named by field id
+/// (`crash_report` in .github/ISSUE_TEMPLATE/bug_report.yml of the org repo).
+fn issue_url_for(crash: Option<&str>) -> String {
     let base = format!("{}/issues/new", crate::WEBSITE_URL);
-    match PREVIOUS_CRASH.get().and_then(|id| id.as_deref()) {
-        Some(id) => format!("{base}?body=%0A%0A---%0ACrash%20report%3A%20{id}"),
+    match crash {
+        Some(id) => format!("{base}?template=bug_report.yml&crash_report={id}"),
         None => base,
     }
 }
@@ -242,5 +251,15 @@ mod tests {
         // PREVIOUS_CRASH is unset in tests: `init` never ran.
         assert_eq!(issue_url(), format!("{}/issues/new", crate::WEBSITE_URL));
         assert_eq!(crash_notice(), None);
+    }
+
+    /// The form field name and the template file name are what GitHub
+    /// matches on; a typo here silently drops the ID.
+    #[test]
+    fn issue_url_after_a_crash_fills_the_form_field() {
+        assert_eq!(
+            issue_url_for(Some("abc123")),
+            "https://omnipty.com/issues/new?template=bug_report.yml&crash_report=abc123"
+        );
     }
 }
