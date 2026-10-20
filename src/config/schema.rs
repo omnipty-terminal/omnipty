@@ -31,18 +31,14 @@ pub struct Config {
 
 /// Crash reports sent to the OmniPTY developer through Sentry: the stack
 /// trace, version and OS. Never anything shown in or typed into a terminal.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Off until the user says yes: a toast asks once, on the first launch
+/// without an explicit `[crash_reports]` section in the config.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CrashReportsConfig {
     /// Read at launch. Turning it off in a live reload stops a running copy;
-    /// turning it back on waits for the next launch.
+    /// turning it on waits for the next launch.
     pub enabled: bool,
-}
-
-impl Default for CrashReportsConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
 }
 
 /// Inline images: the pictures programs send with the kitty, iTerm2 and

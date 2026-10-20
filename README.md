@@ -37,10 +37,9 @@ OmniPTY builds those in, all configured from one TOML file that reloads when you
 It's GPU-rendered on [GPUI](https://www.gpui.rs) (Zed's UI framework), with
 [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) doing the emulation,
 so vim, htop, and tmux itself still just work. No account, no AI, no usage tracking:
-OmniPTY asks the network whether there's a newer release, and sends a
-[crash report](https://omnipty.com/docs/configuration/#crash_reports) (stack trace, version,
-OS, never anything from a terminal) if it crashes. `[crash_reports] enabled = false` turns
-that off.
+OmniPTY asks the network whether there's a newer release, and nothing else unless you say
+yes to [crash reports](https://omnipty.com/docs/configuration/#crash_reports) (stack trace,
+version, OS, never anything from a terminal) when it asks on first launch.
 
 OmniPTY was called Oxide until 0.9.0. Installed copies carry themselves across on update;
 see [upgrading from Oxide](https://omnipty.com/docs/install/#from-oxide) for Homebrew and dotfiles.

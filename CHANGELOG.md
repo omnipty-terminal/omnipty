@@ -13,17 +13,19 @@ write for users: what changed and why it matters, not which files moved.
 
 ### Added
 
-- **Crash reports.** When OmniPTY crashes, it now sends the developer the
-  stack trace, the OmniPTY version, and the OS version, so crashes on other
-  people's machines get fixed instead of going unnoticed. A handful of
-  failures that used to vanish silently are counted the same way: a shell
-  that won't start, a `workspaces.json` that won't parse, an update that
-  doesn't install. A report never contains anything shown in or typed into
-  a terminal: no output, commands, paths, directories, environment, or
-  workspace and tab names, and no hostname, user ID, or IP address. Your home
-  directory is replaced with `~` wherever it might appear. Reports go to
-  Sentry. To turn them off, set `[crash_reports] enabled = false` in the
-  config; it takes effect on save. After a crash, the next launch shows the
+- **Crash reports, if you want them.** OmniPTY can now send the developer a
+  report when it crashes: the stack trace, the OmniPTY version, and the OS
+  version, so crashes on other people's machines get fixed instead of going
+  unnoticed. A handful of failures that used to vanish silently are counted
+  the same way: a shell that won't start, a `workspaces.json` that won't
+  parse, an update that doesn't install. It's off until you say yes: the
+  first launch asks once, in a toast with Send reports and No thanks, and
+  either answer is written to `[crash_reports] enabled` in the config, where
+  you can change it any time. A report never contains anything shown in or
+  typed into a terminal: no output, commands, paths, directories,
+  environment, or workspace and tab names, and no hostname, user ID, or IP
+  address. Your home directory is replaced with `~` wherever it might
+  appear. Reports go to Sentry. After a crash, the next launch shows the
   report's ID, and Help → Report an Issue pre-fills it into the new issue.
 
 ## [0.9.1] - 2026-10-18
