@@ -266,7 +266,8 @@ startup_timeout      = "5s"   # give up on a pane's command if its shell isn't r
 
 # [crash_reports]             # OmniPTY asks once, on first launch; set this to change your answer
 # enabled = false             # when OmniPTY crashes, send the developer the stack trace,
-                              # version and OS — never anything in your terminal
+                              # version and OS — never anything in your terminal. Also a
+                              # start/stop ping each launch, so crash rates mean something
 
 # [keymap]                    # keystroke = "action id"; see the keybindings docs
 # "cmd-shift-p" = "app::palette"

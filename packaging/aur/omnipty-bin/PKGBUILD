@@ -12,7 +12,7 @@ arch=('x86_64')
 url="https://omnipty.com"
 license=('MIT')
 depends=('gcc-libs' 'glibc' 'libxcb' 'libxau' 'libxdmcp' 'libxkbcommon' 'libxkbcommon-x11'
-         'wayland' 'vulkan-icd-loader' 'libnotify' 'hicolor-icon-theme' 'openssl')
+         'wayland' 'vulkan-icd-loader' 'libnotify' 'hicolor-icon-theme')
 optdepends=('vulkan-radeon: Vulkan driver for AMD GPUs'
             'vulkan-intel: Vulkan driver for Intel GPUs'
             'nvidia-utils: Vulkan driver for NVIDIA GPUs'

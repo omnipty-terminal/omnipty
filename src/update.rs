@@ -91,12 +91,12 @@ pub fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
         // The manifest is ours: anything else is a release or hosting
         // problem, not the user's network.
         s => {
-            crate::telemetry::report("update manifest HTTP error", s);
+            crate::telemetry::report_once("update manifest HTTP error", s);
             return Err(format!("update check failed: server said {s}"));
         }
     }
     let json: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
-        crate::telemetry::report("update manifest unreadable", &e);
+        crate::telemetry::report_once("update manifest unreadable", &e);
         format!("update check failed: {e}")
     })?;
     Ok(parse_manifest(

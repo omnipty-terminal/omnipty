@@ -25,15 +25,11 @@ write for users: what changed and why it matters, not which files moved.
   typed into a terminal: no output, commands, paths, directories,
   environment, or workspace and tab names, and no hostname, user ID, or IP
   address. Your home directory is replaced with `~` wherever it might
-  appear. Reports go to Sentry. After a crash, the next launch shows the
-  report's ID, and Help → Report an Issue pre-fills it into the new issue.
-
-## [0.9.1] - 2026-10-18
-
-### Verified
-
-- OmniPTY has been officially verified to work natively an Xorg session under LXQT. ([(#8)](https://github.com/omnipty-terminal/omnipty/pull/8),
-  thanks [@agustux](https://github.com/agustux) for contributing!)
+  appear. Reports go to Sentry. Saying yes also sends a start and a stop
+  ping each launch, so a crash count means something next to a launch
+  count, and one line after each update saying it landed. After a crash,
+  the next launch shows the report's ID, and Help → Report an Issue
+  pre-fills it into the new issue.
 
 ### Fixed
 
@@ -44,6 +40,16 @@ write for users: what changed and why it matters, not which files moved.
   output could be lost the same way, on both platforms. Both are fixed: the
   output is read before the exit is announced, and the hangup is treated as
   the end of the output, not as an error.
+
+## [0.9.1] - 2026-10-18
+
+### Verified
+
+- OmniPTY has been officially verified to work natively an Xorg session under LXQT. ([(#8)](https://github.com/omnipty-terminal/omnipty/pull/8),
+  thanks [@agustux](https://github.com/agustux) for contributing!)
+
+### Fixed
+
 - In bash, sending a grouped command or a loop to a file (`{ …; } > file`,
   `for …; done > file`) no longer puts an invisible escape sequence at the
   start of that file. The shell integration's "command started" signal now

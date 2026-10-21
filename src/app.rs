@@ -1907,8 +1907,9 @@ impl OmniPTY {
         let id = self.push_toast(
             ToastKind::Info,
             "Send crash reports to the OmniPTY developer? A report is the stack trace, \
-             version and OS, never anything shown in or typed into a terminal. \
-             Change your answer any time under [crash_reports] in the config."
+             version and OS, never anything shown in or typed into a terminal. Yes \
+             also sends a start and stop ping each launch, so crash rates mean \
+             something. Change your answer any time under [crash_reports] in the config."
                 .into(),
             false,
             true,

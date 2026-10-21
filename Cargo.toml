@@ -45,12 +45,14 @@ ignore = "0.4"
 trash = "5.2.9"
 # Crash reports (src/telemetry.rs). Not the default features: no debug-images
 # until release binaries ship stripped with symbols uploaded (Part E of
-# support/SENTRY_PLAN.md), and no metrics, which nothing here uses.
+# support/SENTRY_PLAN.md), no metrics, which nothing here uses, and ureq +
+# rustls in place of reqwest + native-tls, so Linux builds don't link libssl.
 sentry = { version = "0.49.3", default-features = false, features = [
   "backtrace",
   "contexts",
   "panic",
-  "transport",
+  "ureq",
+  "rustls",
   "release-health",
   "logs",
 ] }

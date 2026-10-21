@@ -1,7 +1,11 @@
 //! Crash reports, plus a handful of handled-error reports, sent to Sentry.
 //!
 //! Every Sentry call in OmniPTY goes through this module, so grepping for
-//! `telemetry::` shows everything that can leave the machine.
+//! `telemetry::` shows everything that can leave the machine. Keep it that
+//! way for another reason too: everything here uses `Hub::main()`. A bare
+//! `sentry::capture_*` or `configure_scope` on a background thread would
+//! give that thread its own hub, a snapshot of the main one frozen at that
+//! moment, and its tags and breadcrumbs would stop there.
 //!
 //! Only builds made by the release scripts carry a DSN. Forks, CI and
 //! `cargo run` compile without one, and every function here is then a
@@ -110,7 +114,9 @@ pub fn shutdown() {
 /// Crash reports were switched off in a live config reload: stop now.
 /// Switching them back on takes effect at the next launch.
 pub fn disable() {
-    if let Some(client) = Hub::main().client() {
+    let hub = Hub::main();
+    hub.end_session();
+    if let Some(client) = hub.client() {
         client.close(Some(Duration::ZERO));
     }
 }
