@@ -1,0 +1,331 @@
+//! Crash reports, plus a handful of handled-error reports, sent to Sentry.
+//!
+//! Every Sentry call in OmniPTY goes through this module, so grepping for
+//! `telemetry::` shows everything that can leave the machine. Keep it that
+//! way for another reason too: everything here uses `Hub::main()`. A bare
+//! `sentry::capture_*` or `configure_scope` on a background thread would
+//! give that thread its own hub, a snapshot of the main one frozen at that
+//! moment, and its tags and breadcrumbs would stop there.
+//!
+//! Only builds made by the release scripts carry a DSN. Forks, CI and
+//! `cargo run` compile without one, and every function here is then a
+//! cheap no-op. Never pass terminal content to anything in this module:
+//! no PTY output, command lines, working directories, environment, or
+//! workspace and tab names.
+
+use std::borrow::Cow;
+use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use sentry::Hub;
+use sentry::protocol::{Breadcrumb, Event, Level, Stacktrace};
+
+use crate::config::Config;
+
+/// Set by scripts/dmg.sh and scripts/release-linux.sh. Never committed.
+const DSN: Option<&str> = option_env!("OMNIPTY_SENTRY_DSN");
+
+static HOME: OnceLock<String> = OnceLock::new();
+/// The report ID of a crash in the previous run, if there was one.
+static PREVIOUS_CRASH: OnceLock<Option<String>> = OnceLock::new();
+static CRASH_NOTICE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Start Sentry. Hold the guard for the whole of `main`.
+pub fn init(config: &Config) -> Option<sentry::ClientInitGuard> {
+    let crash_marker = crate::paths::cache_dir().join("last_crash.txt");
+    // Read (and clear) even when reports are off now, so a stale marker
+    // never outlives the run after it.
+    let previous = std::fs::read_to_string(&crash_marker)
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty());
+    let _ = std::fs::remove_file(&crash_marker);
+    let _ = PREVIOUS_CRASH.set(previous);
+
+    // Bail out before `sentry::init`, not by handing it no DSN: with no DSN
+    // the SDK falls back to $SENTRY_DSN, and OmniPTY inherits the
+    // environment of whatever launched it, maybe a shell where the user
+    // exported their own project's DSN.
+    if !config.crash_reports.enabled {
+        return None;
+    }
+    // Parsed here because `sentry::init` panics on a malformed DSN, and an
+    // empty one would fall through to $SENTRY_DSN as above.
+    let dsn: sentry::types::Dsn = DSN?.parse().ok()?;
+    if let Some(home) = std::env::var_os("HOME").filter(|h| h.len() > 1) {
+        let _ = HOME.set(home.to_string_lossy().into_owned());
+    }
+    let guard = sentry::init((
+        dsn,
+        sentry::ClientOptions::new()
+            .maybe_release(sentry::release_name!())
+            .auto_session_tracking(true)
+            // Empty rather than unset: unset, the contexts integration fills
+            // in the hostname ("Alice's MacBook Pro") on every event and log.
+            .server_name("")
+            // Our frames, not gpui's or alacritty's, title and group issues.
+            .in_app_include(vec!["omnipty"])
+            .before_send(move |mut event| {
+                event.server_name = None;
+                scrub_event(&mut event);
+                // Only a panic is Fatal. Leave its ID where the next launch
+                // can find it; this runs before the panic hook flushes.
+                if event.level == Level::Fatal {
+                    let _ = std::fs::write(&crash_marker, event.event_id.simple().to_string());
+                }
+                Some(event)
+            })
+            .before_send_log(|mut log| {
+                log.body = scrub(&log.body);
+                Some(log)
+            }),
+    ));
+
+    // Settings and platform details that often explain a crash. Nothing
+    // here identifies the user.
+    tag("images", config.images.enabled);
+    tag("prompt", config.prompt.enabled);
+    tag("shell_integration", config.shell.integration);
+    #[cfg(target_os = "linux")]
+    for (key, var) in [
+        ("session_type", "XDG_SESSION_TYPE"),
+        ("desktop", "XDG_CURRENT_DESKTOP"),
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            tag(key, value);
+        }
+    }
+    Some(guard)
+}
+
+/// End the session and send whatever is queued. Call from `on_app_quit`:
+/// on macOS GPUI quits through `[NSApp terminate:]`, which exits without
+/// returning from `main`, so the guard's Drop never runs there.
+pub fn shutdown() {
+    let hub = Hub::main();
+    hub.end_session();
+    if let Some(client) = hub.client() {
+        client.close(Some(Duration::from_secs(2)));
+    }
+}
+
+/// Crash reports were switched off in a live config reload: stop now.
+/// Switching them back on takes effect at the next launch.
+pub fn disable() {
+    let hub = Hub::main();
+    hub.end_session();
+    if let Some(client) = hub.client() {
+        client.close(Some(Duration::ZERO));
+    }
+}
+
+/// One step in the trail a crash report carries. Recorded on the main hub
+/// so a crash on any thread sees it: another thread's hub is a snapshot of
+/// the main one, taken the first time that thread touches Sentry.
+pub fn breadcrumb(category: &'static str, message: impl Into<String>) {
+    Hub::main().add_breadcrumb(Breadcrumb {
+        category: Some(category.into()),
+        message: Some(message.into()),
+        ..Default::default()
+    });
+}
+
+/// A handled failure worth counting. `what` is a fixed label and reports
+/// group by it; `detail` is the error text (before_send scrubs paths).
+pub fn report(what: &'static str, detail: impl Display) {
+    // Built by hand rather than with `sentry::with_scope`: that pushes onto
+    // the hub's scope stack, which isn't safe to share between threads, and
+    // these come from the PTY and background threads too.
+    Hub::main().capture_event(Event {
+        message: Some(format!("{what}: {detail}")),
+        level: Level::Error,
+        fingerprint: Cow::Owned(vec![Cow::Borrowed(what)]),
+        ..Default::default()
+    });
+}
+
+/// `report`, at most once per run for each `what`. For failures that
+/// repeat (every directory the file tree tries to watch, say).
+pub fn report_once(what: &'static str, detail: impl Display) {
+    static SENT: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    {
+        let mut sent = SENT.lock().unwrap_or_else(|e| e.into_inner());
+        if sent.contains(&what) {
+            return;
+        }
+        sent.push(what);
+    }
+    report(what, detail);
+}
+
+/// A tag on every report from now on.
+pub fn tag(key: &str, value: impl ToString) {
+    Hub::main().configure_scope(|scope| scope.set_tag(key, value));
+}
+
+/// The first launch after an update, for counting how updates land.
+pub fn updated(from: &str, to: &str) {
+    sentry::logger_info!(from = from, to = to, "updated");
+}
+
+/// The previous run's crash report ID, the first time it's asked for: one
+/// toast, not one per window.
+pub fn crash_notice() -> Option<&'static str> {
+    if CRASH_NOTICE_SHOWN.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    PREVIOUS_CRASH.get()?.as_deref()
+}
+
+/// Help → Report an Issue. After a crash, the bug-report form's "Crash
+/// report ID" field is filled in, so the GitHub issue and the Sentry event
+/// find each other. Without one, the plain page: GitHub shows its template
+/// chooser.
+pub fn issue_url() -> String {
+    issue_url_for(PREVIOUS_CRASH.get().and_then(|id| id.as_deref()))
+}
+
+/// omnipty.com/issues/new redirects to GitHub keeping the query string, and
+/// GitHub prefills an issue form's fields from parameters named by field id
+/// (`crash_report` in .github/ISSUE_TEMPLATE/bug_report.yml of the org repo).
+fn issue_url_for(crash: Option<&str>) -> String {
+    let base = format!("{}/issues/new", crate::WEBSITE_URL);
+    match crash {
+        Some(id) => format!("{base}?template=bug_report.yml&crash_report={id}"),
+        None => base,
+    }
+}
+
+/// `/Users/alice/x` → `~/x`. Usernames are the personal detail most likely
+/// to slip into a panic message or an io error.
+fn scrub(text: &str) -> String {
+    match HOME.get() {
+        Some(home) => text.replace(home.as_str(), "~"),
+        None => text.to_owned(),
+    }
+}
+
+fn scrub_event(event: &mut Event<'static>) {
+    if let Some(message) = &mut event.message {
+        *message = scrub(message);
+    }
+    if let Some(entry) = &mut event.logentry {
+        entry.message = scrub(&entry.message);
+    }
+    for exception in &mut event.exception.values {
+        if let Some(value) = &mut exception.value {
+            *value = scrub(value);
+        }
+        scrub_frames(exception.stacktrace.as_mut());
+        scrub_frames(exception.raw_stacktrace.as_mut());
+    }
+    for thread in &mut event.threads.values {
+        scrub_frames(thread.stacktrace.as_mut());
+        scrub_frames(thread.raw_stacktrace.as_mut());
+    }
+    scrub_frames(event.stacktrace.as_mut());
+    for crumb in &mut event.breadcrumbs.values {
+        if let Some(message) = &mut crumb.message {
+            *message = scrub(message);
+        }
+    }
+}
+
+/// A dev build's frames carry the source files' absolute paths, and the
+/// cargo registry and rustup toolchain live under the home directory.
+/// (Release builds have no debug info, so their frames carry no paths.)
+fn scrub_frames(trace: Option<&mut Stacktrace>) {
+    for frame in trace.into_iter().flat_map(|t| &mut t.frames) {
+        if let Some(path) = &mut frame.abs_path {
+            *path = scrub(path);
+        }
+        if let Some(path) = &mut frame.filename {
+            *path = scrub(path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `report_once` sends a label once per run and leaves others alone;
+    /// without Sentry running the send itself is a no-op, so this checks
+    /// the gate, not the wire.
+    #[test]
+    fn report_once_gates_per_label() {
+        static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        fn once(what: &'static str) -> bool {
+            let mut seen = SEEN.lock().unwrap();
+            if seen.contains(&what) {
+                return false;
+            }
+            seen.push(what);
+            true
+        }
+        assert!(once("a"));
+        assert!(!once("a"));
+        assert!(once("b"));
+        // The real thing: no panic, no client, twice in a row.
+        report_once("test label", "detail");
+        report_once("test label", "detail");
+    }
+
+    /// A first test event showed the home directory 40 times, every one of
+    /// them in a frame's `abs_path`, which the message scrub never saw.
+    #[test]
+    fn scrub_reaches_stack_frame_paths() {
+        use sentry::protocol::{Exception, Frame};
+        // Only `init` sets HOME; tests share the process, so set it once
+        // and read back whatever is there.
+        let _ = HOME.set("/Users/alice".into());
+        let home = HOME.get().unwrap().clone();
+        let mut event = Event {
+            message: Some(format!("panicked at {home}/src/main.rs:1")),
+            ..Default::default()
+        };
+        event.exception.values.push(Exception {
+            value: Some(format!("no such file: {home}/x")),
+            stacktrace: Some(Stacktrace {
+                frames: vec![Frame {
+                    abs_path: Some(format!("{home}/.cargo/registry/src/gpui/app.rs")),
+                    filename: Some("app.rs".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        scrub_event(&mut event);
+        assert_eq!(
+            event.message.as_deref(),
+            Some("panicked at ~/src/main.rs:1")
+        );
+        let exception = &event.exception.values[0];
+        assert_eq!(exception.value.as_deref(), Some("no such file: ~/x"));
+        let frame = &exception.stacktrace.as_ref().unwrap().frames[0];
+        assert_eq!(
+            frame.abs_path.as_deref(),
+            Some("~/.cargo/registry/src/gpui/app.rs")
+        );
+    }
+
+    #[test]
+    fn issue_url_without_a_crash_is_the_plain_page() {
+        // PREVIOUS_CRASH is unset in tests: `init` never ran.
+        assert_eq!(issue_url(), format!("{}/issues/new", crate::WEBSITE_URL));
+        assert_eq!(crash_notice(), None);
+    }
+
+    /// The form field name and the template file name are what GitHub
+    /// matches on; a typo here silently drops the ID.
+    #[test]
+    fn issue_url_after_a_crash_fills_the_form_field() {
+        assert_eq!(
+            issue_url_for(Some("abc123")),
+            "https://omnipty.com/issues/new?template=bug_report.yml&crash_report=abc123"
+        );
+    }
+}

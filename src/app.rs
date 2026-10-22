@@ -480,6 +480,9 @@ struct Toast {
     message: String,
     opens_changelog: bool,
     sticky: bool,
+    /// The one-time crash-reports question: two buttons, and clicking the
+    /// body does nothing. × leaves it unanswered, so it's asked again.
+    asks_crash_reports: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -853,6 +856,7 @@ impl OmniPTY {
         }
         if let Some(previous) = crate::update::note_launch_version() {
             let current = env!("CARGO_PKG_VERSION");
+            crate::telemetry::updated(&previous, current);
             // Long enough to read after the window settles, then gone:
             // What's New stays in the Help menu.
             let id = this.push_toast(
@@ -862,6 +866,20 @@ impl OmniPTY {
                 false,
             );
             this.expire_toast(id, 20, cx);
+        }
+        this.ask_about_crash_reports();
+        if let Some(report) = crate::telemetry::crash_notice() {
+            let id = this.push_toast(
+                ToastKind::Info,
+                format!(
+                    "OmniPTY quit unexpectedly last time. Crash report {} was sent; \
+                     Help → Report an Issue will include it.",
+                    report.get(..8).unwrap_or(report)
+                ),
+                false,
+                false,
+            );
+            this.expire_toast(id, 30, cx);
         }
         this.refresh_git_status(cx);
 
@@ -1009,10 +1027,11 @@ impl OmniPTY {
             cx.open_url(url);
         }
         #[cfg(target_os = "macos")]
-        if let UpdateState::Ready { dmg, .. } = &self.update {
+        if let UpdateState::Ready { dmg, version } = &self.update {
             match crate::update::install_and_restart(dmg) {
                 Ok(()) => {
                     if crate::update::installed_bundle().is_some() {
+                        crate::update::note_install_attempt(version);
                         cx.quit();
                     } else {
                         self.toast(
@@ -1781,6 +1800,9 @@ impl OmniPTY {
                     self.drawer_width = None;
                     self.write_window_state();
                 }
+                if self.config.crash_reports.enabled && !new_config.crash_reports.enabled {
+                    crate::telemetry::disable();
+                }
                 self.config = Rc::new(new_config);
                 self.run_startup_commands =
                     self.config.workspaces.run_startup_commands && !self.startup_skipped_at_launch;
@@ -1866,8 +1888,48 @@ impl OmniPTY {
             message,
             opens_changelog,
             sticky,
+            asks_crash_reports: false,
         });
         id
+    }
+
+    /// Ask about crash reports, once per process (one window, not every
+    /// window opened at startup) and only while the config hasn't answered.
+    fn ask_about_crash_reports(&mut self) {
+        static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let text = std::fs::read_to_string(config::config_path()).unwrap_or_default();
+        if config::crash_reports_answered(&text) {
+            return;
+        }
+        let id = self.push_toast(
+            ToastKind::Info,
+            "Send crash reports to the OmniPTY developer? A report is the stack trace, \
+             version and OS, never anything shown in or typed into a terminal. Yes \
+             also sends a start and stop ping each launch, so crash rates mean \
+             something. Change your answer any time under [crash_reports] in the config."
+                .into(),
+            false,
+            true,
+        );
+        if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
+            toast.asks_crash_reports = true;
+        }
+    }
+
+    fn answer_crash_reports(&mut self, id: usize, enabled: bool, cx: &mut Context<Self>) {
+        self.dismiss_toast(id, cx);
+        match persist_crash_reports(enabled) {
+            Ok(()) if enabled => self.toast(
+                ToastKind::Info,
+                "thanks — crash reports start at the next launch".into(),
+                cx,
+            ),
+            Ok(()) => {}
+            Err(e) => self.toast(ToastKind::Error, e, cx),
+        }
     }
 
     /// A notice that times out on its own: 4s for info, 8s for errors.
@@ -1903,6 +1965,13 @@ impl OmniPTY {
     }
 
     fn click_toast(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .toasts
+            .iter()
+            .any(|t| t.id == id && t.asks_crash_reports)
+        {
+            return;
+        }
         let opens_changelog = self.toasts.iter().any(|t| t.id == id && t.opens_changelog);
         self.dismiss_toast(id, cx);
         if opens_changelog {
@@ -2168,7 +2237,42 @@ impl OmniPTY {
                             this.click_toast(id, window, cx)
                         }),
                     )
-                    .child(div().min_w_0().child(t.message.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(t.message.clone())
+                            .when(t.asks_crash_reports, |body| {
+                                let button = |label: &'static str, enabled: bool| {
+                                    div()
+                                        .id((label, id))
+                                        .px_2()
+                                        .rounded_sm()
+                                        .bg(blend(bg, fg, 0.15))
+                                        .hover(|s| s.bg(blend(bg, fg, 0.25)))
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Left,
+                                            cx.listener(
+                                                move |this, _: &gpui::MouseDownEvent, _w, cx| {
+                                                    cx.stop_propagation();
+                                                    this.answer_crash_reports(id, enabled, cx);
+                                                },
+                                            ),
+                                        )
+                                        .child(label)
+                                };
+                                body.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_2()
+                                        .child(button("Send reports", true))
+                                        .child(button("No thanks", false)),
+                                )
+                            }),
+                    )
                     // Dismiss without following the toast's click action.
                     .child(
                         div()
@@ -2205,7 +2309,8 @@ impl OmniPTY {
             }
             TreeEvent::ChangedRoot(path) | TreeEvent::CdShell(path) => {
                 let path = path.clone();
-                self.active_pane().update(cx, |t, cx| t.request_cd(&path, cx));
+                self.active_pane()
+                    .update(cx, |t, cx| t.request_cd(&path, cx));
             }
             TreeEvent::RootChanged(root) => {
                 let root = root.clone();
@@ -2936,9 +3041,11 @@ impl OmniPTY {
                                     .child("▸"),
                             )
                             .child(match (row.command.text.is_empty(), is_selected) {
-                                (_, true) => {
-                                    self.render_line_edit(&row.command, "nothing — just a shell", cx)
-                                }
+                                (_, true) => self.render_line_edit(
+                                    &row.command,
+                                    "nothing — just a shell",
+                                    cx,
+                                ),
                                 (true, false) => {
                                     div().flex_1().text_color(dim).child("just a shell")
                                 }
@@ -5130,7 +5237,12 @@ impl OmniPTY {
     ) {
         if restore {
             let run = self.run_startup_commands;
-            for saved in crate::workspaces::load() {
+            let pinned = crate::workspaces::load();
+            crate::telemetry::breadcrumb(
+                "workspaces",
+                format!("restoring {} pinned", pinned.len()),
+            );
+            for saved in pinned {
                 let mut tabs = Vec::new();
                 for st in &saved.tabs {
                     let layout = st
@@ -6068,6 +6180,22 @@ fn persist_preset(name: &str, variant: Option<&str>) -> Result<(), String> {
             doc["colors"] = toml_edit::Item::Table(colors);
         }
     }
+    std::fs::write(&path, doc.to_string()).map_err(|e| format!("couldn't write config: {e}"))
+}
+
+/// Write the answer to the crash-reports question into config.toml, keeping
+/// the rest of the file as it is. The live reload then sees it: off stops a
+/// running copy at once, on waits for the next launch (see telemetry::init).
+fn persist_crash_reports(enabled: bool) -> Result<(), String> {
+    let path = config::config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("couldn't edit config: {e}"))?;
+    if !doc.contains_table("crash_reports") {
+        doc["crash_reports"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    doc["crash_reports"]["enabled"] = toml_edit::value(enabled);
     std::fs::write(&path, doc.to_string()).map_err(|e| format!("couldn't write config: {e}"))
 }
 

@@ -233,10 +233,27 @@ pub fn load_from(path: &Path) -> Vec<SavedWorkspace> {
     };
     let saved: Vec<SavedWorkspace> = match parse(&text) {
         Ok((version, saved)) => {
-            backup_older_format(path, version);
+            if backup_older_format(path, version).is_some() {
+                crate::telemetry::breadcrumb(
+                    "workspaces",
+                    format!("upgrading format v{version} → v{FORMAT_VERSION}"),
+                );
+            }
             saved
         }
-        Err(_) => {
+        Err(e) => {
+            // Never the text: it holds commands and paths. Where it broke is
+            // enough to build a fixture from. Not `e.to_string()` either:
+            // serde_json quotes values from the file in its messages.
+            crate::telemetry::report(
+                "workspaces.json didn't parse",
+                format_args!(
+                    "{:?} error at line {} column {} (this build writes v{FORMAT_VERSION})",
+                    e.classify(),
+                    e.line(),
+                    e.column()
+                ),
+            );
             // Never silently discard a file we failed to parse: the next
             // auto-save would see "no pinned workspaces" and delete it,
             // turning one bad write into permanent data loss. Move it aside

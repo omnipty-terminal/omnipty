@@ -264,6 +264,11 @@ run_startup_commands = true   # re-run each pane's saved startup command when a 
                               # or hold shift while OmniPTY launches)
 startup_timeout      = "5s"   # give up on a pane's command if its shell isn't ready by then
 
+# [crash_reports]             # OmniPTY asks once, on first launch; set this to change your answer
+# enabled = false             # when OmniPTY crashes, send the developer the stack trace,
+                              # version and OS — never anything in your terminal. Also a
+                              # start/stop ping each launch, so crash rates mean something
+
 # [keymap]                    # keystroke = "action id"; see the keybindings docs
 # "cmd-shift-p" = "app::palette"
 # "cmd-d"       = ""          # unbind a default
@@ -330,9 +335,29 @@ options = { hide_on_success = true }
 # kind = "duration"
 "##;
 
+/// Whether the config text settles the crash-reports question: an explicit
+/// `[crash_reports]` section, however it was written. The generated default
+/// leaves it commented out so a fresh install is asked once. Text that
+/// won't parse counts as answered: the error banner is enough for one launch.
+pub fn crash_reports_answered(text: &str) -> bool {
+    text.parse::<toml_edit::DocumentMut>()
+        .map(|doc| doc.contains_table("crash_reports"))
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crash_reports_question_is_settled_by_an_explicit_section() {
+        assert!(!crash_reports_answered(""));
+        assert!(!crash_reports_answered(&default_config_file()));
+        assert!(crash_reports_answered("[crash_reports]\nenabled = false\n"));
+        assert!(crash_reports_answered("[crash_reports]\nenabled = true\n"));
+        // A file that won't parse: don't pile a question onto the error banner.
+        assert!(crash_reports_answered("[crash_reports\n"));
+    }
 
     #[test]
     fn generated_config_parses_and_speaks_this_platforms_keys() {

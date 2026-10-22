@@ -40,6 +40,23 @@ use super::session::TermSize;
 const PTY_READ_WRITE_TOKEN: usize = 0;
 const PTY_CHILD_EVENT_TOKEN: usize = 1;
 
+/// Linux: once nothing has the slave side open (the shell, and everything
+/// it started, has gone), the master reports a hangup, and reading or
+/// writing it fails with EIO. That's the end of the output, not an I/O
+/// fault, and the child's exit status is still on its way through the
+/// SIGCHLD pipe. alacritty's own loop treats it the same way.
+fn is_hangup(err: &io::Error) -> bool {
+    cfg!(target_os = "linux") && err.raw_os_error() == Some(libc::EIO)
+}
+
+/// A PTY failure that ends this pane's I/O. Was only an `eprintln!`, which
+/// goes nowhere when OmniPTY wasn't started from a terminal. Linux hangups
+/// never get here: `is_hangup` is checked first.
+fn pty_failed(what: &'static str, err: &io::Error) {
+    eprintln!("omnipty: {what}: {err}");
+    crate::telemetry::report(what, err);
+}
+
 /// Max bytes to read from the PTY before forcing terminal synchronisation.
 const READ_BUFFER_SIZE: usize = 0x10_0000;
 /// Max bytes to parse while holding the terminal lock in one go.
@@ -218,6 +235,9 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
     fn pty_read(&mut self, state: &mut State, buf: &mut [u8]) -> io::Result<()> {
         let mut unprocessed = 0;
         let mut processed = 0;
+        // Hung up with output read but not yet parsed: parse it before
+        // reporting the hangup (the next read fails the same way).
+        let mut hangup_pending = false;
 
         // Reserve the next terminal lock for PTY reading.
         let _lease = Some(self.term.lease());
@@ -233,6 +253,7 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                             break;
                         }
                     }
+                    _ if is_hangup(&err) && unprocessed > 0 => hangup_pending = true,
                     _ => return Err(err),
                 },
             }
@@ -240,7 +261,10 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
             let terminal = match &mut terminal {
                 Some(terminal) => terminal,
                 None => terminal.insert(match self.term.try_lock_unfair() {
-                    None if unprocessed >= READ_BUFFER_SIZE => self.term.lock_unfair(),
+                    // Nothing more is coming, so don't wait for a full buffer.
+                    None if hangup_pending || unprocessed >= READ_BUFFER_SIZE => {
+                        self.term.lock_unfair()
+                    }
                     None => continue,
                     Some(terminal) => terminal,
                 }),
@@ -309,6 +333,17 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
         Ok(())
     }
 
+    /// The shell hung up (see `is_hangup`). Take the master out of the
+    /// poller: level-triggered, it would wake the loop continuously until
+    /// the SIGCHLD arrives. Paint what was parsed, then wait for the exit.
+    fn hang_up(&mut self, hung_up: &mut bool) {
+        if !*hung_up {
+            let _ = self.poll.delete(self.pty.file());
+            *hung_up = true;
+            self.listener.send_event(AlacEvent::Wakeup);
+        }
+    }
+
     /// Run the loop on its own thread. The returned handle yields once the
     /// loop has exited and the PTY has been dropped (which waits on the
     /// child), so callers join it off the main thread.
@@ -316,11 +351,12 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
         alacritty_terminal::thread::spawn_named("PTY reader", move || {
             let mut state = State::default();
             let mut buf = vec![0u8; READ_BUFFER_SIZE];
+            let mut hung_up = false;
 
             let poll_opts = PollMode::Level;
             let mut interest = PollingEvent::readable(0);
             if let Err(err) = unsafe { self.pty.register(&self.poll, interest, poll_opts) } {
-                eprintln!("omnipty: pty registration failed: {err}");
+                pty_failed("pty registration failed", &err);
                 return;
             }
 
@@ -339,7 +375,7 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                     match err.kind() {
                         ErrorKind::Interrupted => continue,
                         _ => {
-                            eprintln!("omnipty: pty poll failed: {err}");
+                            pty_failed("pty poll failed", &err);
                             break 'event_loop;
                         }
                     }
@@ -359,6 +395,11 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                     match event.key {
                         PTY_CHILD_EVENT_TOKEN => {
                             if let Some(ChildEvent::Exited(status)) = self.pty.next_child_event() {
+                                // The shell can exit with its last output still
+                                // unread, and for a failing command that output
+                                // is the error message. Read it before the pane
+                                // hears about the exit (alacritty: drain_on_exit).
+                                let _ = self.pty_read(&mut state, &mut buf);
                                 if let Some(status) = status {
                                     self.listener.send_event(AlacEvent::ChildExit(status));
                                 }
@@ -368,19 +409,35 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                             }
                         }
                         PTY_READ_WRITE_TOKEN => {
+                            if hung_up {
+                                continue;
+                            }
                             if event.is_interrupt() {
+                                // epoll's HUP (kqueue never sets it): the same
+                                // hangup, reported before a read failed. Take
+                                // whatever output is left, then wait.
+                                let _ = self.pty_read(&mut state, &mut buf);
+                                self.hang_up(&mut hung_up);
                                 continue;
                             }
                             if event.readable
                                 && let Err(err) = self.pty_read(&mut state, &mut buf)
                             {
-                                eprintln!("omnipty: pty read failed: {err}");
+                                if is_hangup(&err) {
+                                    self.hang_up(&mut hung_up);
+                                    continue;
+                                }
+                                pty_failed("pty read failed", &err);
                                 break 'event_loop;
                             }
                             if event.writable
                                 && let Err(err) = self.pty_write(&mut state)
                             {
-                                eprintln!("omnipty: pty write failed: {err}");
+                                if is_hangup(&err) {
+                                    self.hang_up(&mut hung_up);
+                                    continue;
+                                }
+                                pty_failed("pty write failed", &err);
                                 break 'event_loop;
                             }
                         }
@@ -388,16 +445,21 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                     }
                 }
 
+                // After a hangup the master is out of the poller: reregistering
+                // would fail and end the loop before the exit status arrives.
                 let needs_write = state.needs_write();
-                if needs_write != interest.writable {
+                if !hung_up && needs_write != interest.writable {
                     interest.writable = needs_write;
                     if let Err(err) = self.pty.reregister(&self.poll, interest, poll_opts) {
-                        eprintln!("omnipty: pty reregistration failed: {err}");
+                        pty_failed("pty reregistration failed", &err);
                         break 'event_loop;
                     }
                 }
             }
 
+            // After a hangup this fails on the master, which is already out,
+            // and leaves the SIGCHLD pipe registered until the Pty drops and
+            // closes it, just below. Harmless.
             let _ = self.pty.deregister(&self.poll);
             // `self` (and the Pty, which waits on the child) drops here, on
             // this thread.

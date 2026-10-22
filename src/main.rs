@@ -12,6 +12,7 @@ mod panes;
 mod paths;
 mod prompt;
 mod startup;
+mod telemetry;
 mod terminal;
 mod tree;
 mod update;
@@ -45,7 +46,10 @@ pub(crate) fn menus() -> Vec<Menu> {
             MenuItem::action("Hide Others", HideOthers),
         ]);
     }
-    omnipty.extend([MenuItem::separator(), MenuItem::action("Quit OmniPTY", Quit)]);
+    omnipty.extend([
+        MenuItem::separator(),
+        MenuItem::action("Quit OmniPTY", Quit),
+    ]);
     vec![
         Menu {
             // The first menu takes the app's name in the menu bar.
@@ -170,6 +174,11 @@ fn main() {
     }
 
     let (config, config_error) = config::load();
+    // After the config, so `[crash_reports] enabled = false` is honoured, and
+    // after the early returns above, so `--version` never starts it.
+    let _sentry = telemetry::init(&config);
+    #[cfg(target_os = "macos")]
+    update::check_install_attempt();
     // Silent-cd/run handoff files a killed shell never consumed.
     prompt::integration::clean_stale_channels();
 
@@ -183,6 +192,16 @@ fn main() {
         app::open_omnipty_window(config, error, None, None, true, cx);
     });
     app.run(move |cx: &mut App| {
+        // macOS quits through [NSApp terminate:], which exits without coming
+        // back here, so `_sentry` is never dropped. End the session and flush
+        // on quit instead, in the closure body rather than the future: GPUI
+        // waits only 100 ms on quit futures.
+        cx.on_app_quit(|_| {
+            telemetry::shutdown();
+            async {}
+        })
+        .detach();
+
         // Must happen before launch completes, or banners never show while
         // OmniPTY is frontmost.
         notifications::init();
@@ -243,7 +262,7 @@ fn main() {
             }
         });
         cx.on_action(|_: &OpenHelp, cx| cx.open_url(&format!("{WEBSITE_URL}/docs/")));
-        cx.on_action(|_: &ReportIssue, cx| cx.open_url(&format!("{WEBSITE_URL}/issues/new")));
+        cx.on_action(|_: &ReportIssue, cx| cx.open_url(&telemetry::issue_url()));
 
         // The menu bar is a macOS thing; on Linux the window draws its own
         // ☰ menu from the same list (see `OmniPTY::render_app_menu`).

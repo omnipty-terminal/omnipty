@@ -630,8 +630,17 @@ impl TerminalPane {
                 }
             }
         };
+        let shell_name = std::path::Path::new(&options.program)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_owned();
         match TerminalSession::spawn(options, self.size) {
             Ok((session, mut rx)) => {
+                if self.command.is_none() {
+                    // Shell-integration bugs tend to belong to one shell.
+                    crate::telemetry::tag("shell", &shell_name);
+                }
                 session.set_term_options(self.term_config());
                 self.session = Some(session);
                 self.child_exited = None;
@@ -671,6 +680,14 @@ impl TerminalPane {
                 .detach();
             }
             Err(e) => {
+                // NotFound is a `shell.program` typo, and the pane title already
+                // says so. `-e` commands are the user's own programs.
+                if self.command.is_none() && e.kind() != std::io::ErrorKind::NotFound {
+                    crate::telemetry::report(
+                        "shell failed to start",
+                        format_args!("{shell_name}: {e}"),
+                    );
+                }
                 self.title = format!("failed to spawn shell: {e}");
                 self.child_exited = Some(None);
             }
@@ -702,6 +719,16 @@ impl TerminalPane {
                 // typing must not wait for it. Its cells draw blank until
                 // it lands.
                 let decode = cx.background_executor().spawn(async move {
+                    // A crash in the decoder then says what it was fed:
+                    // enough to build a test image, and nothing more.
+                    let (kind, bytes) = match &data {
+                        graphics::ImageData::Encoded { bytes, .. } => ("encoded", bytes.len()),
+                        graphics::ImageData::Raw { bytes, .. } => ("raw", bytes.len()),
+                    };
+                    crate::telemetry::breadcrumb(
+                        "image",
+                        format!("decoding {bytes} {kind} bytes, {}x{}", size.0, size.1),
+                    );
                     let image = images::decode(data, size);
                     // Decoded: its share of the PTY thread's budget is free.
                     drop(reservation);

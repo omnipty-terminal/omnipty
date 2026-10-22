@@ -51,14 +51,24 @@ pub fn create() -> Option<(TreeWatcher, UnboundedReceiver<Vec<PathBuf>>)> {
 
 impl TreeWatcher {
     pub fn watch(&mut self, dir: &PathBuf) {
-        if self.watched.insert(dir.clone())
-            && self
-                .debouncer
-                .watcher()
-                .watch(dir, RecursiveMode::NonRecursive)
-                .is_err()
+        if !self.watched.insert(dir.clone()) {
+            return;
+        }
+        if let Err(e) = self
+            .debouncer
+            .watcher()
+            .watch(dir, RecursiveMode::NonRecursive)
         {
             self.watched.remove(dir);
+            // A directory deleted between scan and watch is routine. Once
+            // per run: a tree that hits the inotify limit fails on every
+            // directory after that.
+            if !matches!(e.kind, notify::ErrorKind::PathNotFound) {
+                crate::telemetry::report_once(
+                    "file tree watch failed",
+                    format_args!("{:?}", e.kind),
+                );
+            }
         }
     }
 

@@ -85,8 +85,16 @@ else
     --env HOME=/tmp \
     --env CARGO_HOME=/out/cargo-home \
     --env CARGO_TARGET_DIR=/out \
+    --env OMNIPTY_SENTRY_DSN \
     "$IMAGE" cargo build --release --locked
   BIN="$OUT/release/omnipty"
+fi
+# `--env NAME` above copies the host's value and passes nothing when unset,
+# so a build from release-linux.sh carries the crash-report DSN and a plain
+# local one doesn't. Make sure the build saw it when it was meant to.
+if [[ -n "${OMNIPTY_SENTRY_DSN:-}" ]] && ! grep -qaF "$OMNIPTY_SENTRY_DSN" "$BIN"; then
+  echo "error: the DSN didn't make it into $BIN." >&2
+  exit 1
 fi
 
 # Check what the binary actually asks of glibc before it goes anywhere. This
@@ -122,7 +130,10 @@ GLIBC_NEEDED=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIB
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 cp "$BIN" "$STAGE/omnipty"
-strip "$STAGE/omnipty" 2>/dev/null || true
+# Only the debug info: a full strip would also drop the symbol table, and
+# crash reports would then arrive as bare addresses (Cargo already leaves
+# the debug info out of release builds; this is belt and braces).
+strip --strip-debug "$STAGE/omnipty" 2>/dev/null || true
 cp "$ROOT/assets/linux/omnipty.desktop" "$STAGE/omnipty.desktop"
 cp -R "$ROOT/assets/linux/icons" "$STAGE/icons"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE"

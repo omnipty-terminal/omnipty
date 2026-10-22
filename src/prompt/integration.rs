@@ -127,24 +127,38 @@ pub fn setup(config: &Config, shell_program: &str) -> ShellIntegration {
     let Some(cache) = cache_dir() else {
         return integration;
     };
-    if std::fs::create_dir_all(&cache).is_err() {
+    // Each failure below quietly leaves a shell with no integration: no
+    // prompt styling, no OSC markers, no command log. Report the first one
+    // per run. An `io::Error` from `fs` carries no path, so nothing
+    // personal goes out.
+    if let Err(e) = std::fs::create_dir_all(&cache) {
+        crate::telemetry::report_once(
+            "shell integration setup failed",
+            format_args!("cache dir: {e}"),
+        );
         return integration;
     }
 
     if shell_name.starts_with("zsh") {
         let zdotdir = cache.join("zdotdir");
-        if std::fs::create_dir_all(&zdotdir).is_err() {
+        if let Err(e) = std::fs::create_dir_all(&zdotdir) {
+            crate::telemetry::report_once(
+                "shell integration setup failed",
+                format_args!("zdotdir: {e}"),
+            );
             return integration;
         }
-        if write_zsh_shim(
+        if let Err(e) = write_zsh_shim(
             &cache,
             &zdotdir,
             &config.prompt,
             style_prompt,
             config.commands.emit_cmdline,
-        )
-        .is_err()
-        {
+        ) {
+            crate::telemetry::report_once(
+                "shell integration setup failed",
+                format_args!("zsh: {e}"),
+            );
             return integration;
         }
         if let Ok(user_zdotdir) = std::env::var("ZDOTDIR") {
@@ -157,12 +171,14 @@ pub fn setup(config: &Config, shell_program: &str) -> ShellIntegration {
             .insert("ZDOTDIR".into(), zdotdir.to_string_lossy().to_string());
     } else if shell_name.starts_with("bash") {
         let init_path = cache.join("init.bash");
-        if std::fs::write(
+        if let Err(e) = std::fs::write(
             &init_path,
             super::generate_init_bash(&config.prompt, style_prompt, config.commands.emit_cmdline),
-        )
-        .is_err()
-        {
+        ) {
+            crate::telemetry::report_once(
+                "shell integration setup failed",
+                format_args!("bash: {e}"),
+            );
             return integration;
         }
         let mut args: Vec<String> = config
