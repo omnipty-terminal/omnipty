@@ -5,7 +5,7 @@
 # the URL and the checksum after each release; regenerate .SRCINFO with
 # `makepkg --printsrcinfo > .SRCINFO` before pushing to the AUR.
 pkgname=omnipty-bin
-pkgver=0.9.1
+pkgver=0.9.2
 pkgrel=1
 pkgdesc="A native, GPU-rendered terminal emulator with a vim-driven file tree drawer, splits and workspaces"
 arch=('x86_64')
@@ -23,7 +23,7 @@ provides=('omnipty')
 conflicts=('omnipty' 'oxide-terminal-bin')
 replaces=('oxide-terminal-bin')
 source=("https://downloads.omnipty.com/omnipty/${pkgver}/omnipty-${pkgver}-linux-x86_64.tar.gz")
-sha256sums=('40e0e21faf106d5a8c8d9fba687f3473eb01756dda527f2f544eec891ee62700')
+sha256sums=('3d7b2efdd015975104b7545105eeac893bb5f64e8ed176e03e4f2e81050ae53c')
 
 package() {
   cd "omnipty-${pkgver}-linux-x86_64"
