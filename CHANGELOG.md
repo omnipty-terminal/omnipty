@@ -11,6 +11,8 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-22
+
 ### Added
 
 - **Crash reports, if you want them.** OmniPTY can now send the developer a
