@@ -102,7 +102,7 @@ while simultaneously catching potential errors instantly as they occur and relea
 | # | Goal | Status |
 | :-: | ----------------------------------------------------- | :----: |
 | 1 | Rename to OmniPTY | ✅ |
-| 2 | Add Sentry for Error/Crash reporting | 🛠️ |
+| 2 | Add Sentry for Error/Crash reporting | ✅ |
 | 3 | Global workspace/tab/pane name search and jump-to | ❌ |
 | 4 | Windows port | ❌ |
 
