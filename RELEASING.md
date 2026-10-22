@@ -169,7 +169,7 @@ on it:
 
 ```sh
 ssh linux-box
-cd ~/Code/oxide-app/oxide        # the clone keeps its old folder name
+cd ~/Code/omnipty/omnipty
 git pull --ff-only && git fetch --tags    # HEAD is at (or just past) v0.9.1
 ./scripts/release-linux.sh
 ```
