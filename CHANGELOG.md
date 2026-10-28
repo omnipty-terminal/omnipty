@@ -11,6 +11,15 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Command-line tools can ask for Calendar, Reminders and other access.**
+  Tools that read your calendars or reminders (like `ical`), control other
+  apps with AppleScript, or use the camera or microphone were silently denied
+  in OmniPTY, with no prompt and no entry in System Settings. macOS now asks
+  you the first time, as it does in Terminal and iTerm2.
+  ([#11](https://github.com/omnipty-terminal/omnipty/issues/11))
+
 ## [0.9.2] - 2026-10-22
 
 ### Added

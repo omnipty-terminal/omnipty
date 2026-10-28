@@ -31,7 +31,7 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/omnipty.icns"
 
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-cat > "$APP/Contents/Info.plist" <<PLIST
+cat >"$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -68,18 +68,41 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>OmniPTY needs access to removable volumes to browse and run commands on them.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>OmniPTY needs access to network volumes to browse and run commands on them.</string>
+  <!-- Programs run inside OmniPTY are charged to OmniPTY by macOS; without these their requests are denied silently (#11). -->
+	<key>NSCalendarsUsageDescription</key>
+	<string>A program running in OmniPTY wants to access your calendars.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>A program running in OmniPTY wants to access your calendars.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>A program running in OmniPTY wants to access your reminders.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>A program running in OmniPTY wants to access your reminders.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>A program running in OmniPTY wants to access your contacts.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A program running in OmniPTY wants to access your photo library.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>A program running in OmniPTY wants to control another app.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A program running in OmniPTY wants to use the camera.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A program running in OmniPTY wants to use the microphone.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>
 </plist>
 PLIST
 
+ENTITLEMENTS="$ROOT/scripts/OmniPTY.entitlements"
+
 # Terminal emulators must not be sandboxed; ad-hoc signing ("-") is enough to
 # quiet Gatekeeper on your own machine. Hardened runtime only with a real ID.
+# entitlements are hardened-runtime exceptions, not sandbox ones
 if [[ "$SIGN_ID" == "-" ]]; then
   codesign --force --sign - "$APP"
 else
-  codesign --deep --force --options runtime --sign "$SIGN_ID" "$APP"
+  codesign --deep --force --options runtime \
+    --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
 fi
 
 echo "built $APP"
