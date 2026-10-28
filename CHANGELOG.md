@@ -11,6 +11,16 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Jump to any workspace, tab, or pane by name.** `cmd-shift-g`
+  (`ctrl-shift-g` on Linux, or *Go to Workspace, Tab, or Pane* in the
+  palette) opens a search across everything that's open — workspace names,
+  tab titles, working directories, running programs, even the last command
+  that ran in a pane — shown as a tree with the best match selected. Press
+  ⏎ to go there. With nothing typed it lists everything with the current
+  pane marked, so ↓↓⏎ is a keyboard pane switcher too.
+
 ### Fixed
 
 - **Command-line tools can ask for Calendar, Reminders and other access.**

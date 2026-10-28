@@ -209,6 +209,10 @@ pub static MACOS: &[DefaultBinding] = &[
     b("cmd-alt-t", "app::select_theme", Root),
     b("cmd-shift-p", "app::palette", Root),
     b("cmd-p", "app::file_finder", Root),
+    // macOS keeps cmd-g / cmd-shift-g for find-next / find-previous; the
+    // search bar doesn't bind them and this is Root-only, so no clash. If
+    // search-next ever gets a key, it's cmd-g in the search context.
+    b("cmd-shift-g", "app::go_to", Root),
     b("cmd-shift-r", "drawer::reveal", Root),
     b("cmd-,", "app::settings", Root),
     b("cmd-enter", "overlay::confirm_alt", Overlay),
@@ -276,6 +280,7 @@ pub static LINUX: &[DefaultBinding] = &[
     b("ctrl-shift-alt-r", "drawer::reveal", Root),
     b("ctrl-shift-p", "app::palette", Root),
     b("ctrl-shift-o", "app::file_finder", Root),
+    b("ctrl-shift-g", "app::go_to", Root),
     b("ctrl-w shift-t", "app::select_theme", Root),
     b("ctrl-,", "app::settings", Root),
     b("ctrl-enter", "overlay::confirm_alt", Overlay),

@@ -23,6 +23,7 @@ omnipty_actions! {
     SelectTheme     => "app::select_theme",      "Select Theme",            "Application", ["colors", "preset"], Root;
     CommandPalette  => "app::palette",           "Command Palette",         "Application", ["commands"], Root;
     FileFinder      => "app::file_finder",       "Find File",               "Application", ["fuzzy", "open", "cmd-p"], Root;
+    GoTo            => "app::go_to",             "Go to Workspace, Tab, or Pane", "Application", ["jump", "switch", "find pane", "find tab", "find workspace", "search"], Root;
     Hide            => "app::hide",              "Hide OmniPTY",              "Application", [], Root;
     HideOthers      => "app::hide_others",       "Hide Others",             "Application", [], Root;
     OpenHelp        => "app::help",              "Open Help",               "Application", ["docs"], Root;
