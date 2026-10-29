@@ -103,7 +103,7 @@ while simultaneously catching potential errors instantly as they occur and relea
 | :-: | ----------------------------------------------------- | :----: |
 | 1 | Rename to OmniPTY | ✅ |
 | 2 | Add Sentry for Error/Crash reporting | ✅ |
-| 3 | Global workspace/tab/pane name search and jump-to | ❌ |
+| 3 | Global workspace/tab/pane name search and jump-to | 🛠️ |
 | 4 | Windows port | ❌ |
 
 As OmniPTY grows, so will this list. It is also non-inclusive, so there may be smaller feature adds and fixes not listed here.
