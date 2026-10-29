@@ -20,12 +20,16 @@ jobs:
           NUMBER: ${{ github.event.issue.number }}
           AUTHOR: ${{ github.event.issue.user.login }}
           BODY: ${{ github.event.issue.body }}
+        # The webhook targets a forum channel, so each issue becomes its own
+        # post: thread_name is required there and is capped at 100 characters.
         run: |
           jq -n \
+            --arg thread "$(printf '#%s %s' "$NUMBER" "$TITLE" | head -c 100)" \
             --arg title "🐛 #$NUMBER $TITLE" \
             --arg url "$URL" \
             --arg author "$AUTHOR" \
             --arg desc "$(printf '%s' "$BODY" | awk '/^### What happened\?/{f=1;next} /^### /{f=0} f' | head -c 300)" \
-            '{embeds: [{title: $title, url: $url, description: $desc,
+            '{thread_name: $thread,
+              embeds: [{title: $title, url: $url, description: $desc,
                         color: 15158332, author: {name: $author}}]}' \
           | curl -sSf -H "Content-Type: application/json" -d @- "$WEBHOOK"
