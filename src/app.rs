@@ -23,6 +23,7 @@ use crate::keymap::registry::{self, ActionContext, ActionMeta};
 use crate::keymap::resolve::pretty_keys;
 use crate::keymap::{self, ResolvedKeymap};
 use crate::line_edit::{self, LineEdit};
+use crate::navigator;
 use crate::notifications;
 use crate::palette::{self, PaletteItem};
 use crate::panes::{Axis, Direction, Node, NodePath};
@@ -277,6 +278,8 @@ enum Overlay {
     ThemePicker(ThemePicker),
     History(HistoryState),
     FileFinder(FinderState),
+    /// Go To: the workspace › tab › pane tree.
+    Navigator(NavigatorState),
     /// One line of text for whoever asked: a file's new name, a workspace's.
     Prompt(PromptState),
     Confirm(ConfirmState),
@@ -407,6 +410,19 @@ struct HistoryState {
     /// Indices into `items`, best first.
     matches: Vec<HistoryMatch>,
     selected: usize,
+    scroll: usize,
+    return_focus: FocusTarget,
+}
+
+/// Rows visible in the Go To tree before it scrolls — taller than the
+/// palette, because a tree spends rows on structure.
+const NAVIGATOR_ROWS: usize = 16;
+
+struct NavigatorState {
+    query: LineEdit,
+    /// The filtered tree, rebuilt from live state on every keystroke; its
+    /// `selected` is the cursor.
+    tree: navigator::Rows,
     scroll: usize,
     return_focus: FocusTarget,
 }
@@ -1400,6 +1416,22 @@ impl OmniPTY {
     /// this was the last pane of the last tab of the last workspace — the
     /// caller decides whether that closes the window.
     fn close_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let open = self.close_pane_inner(id, window, cx);
+        // A pane that exits under the Go To overlay drops out of its tree;
+        // the close focused its neighbour, so take focus back.
+        if matches!(self.overlay, Some(Overlay::Navigator(_))) {
+            self.navigator_refresh(true, cx);
+            window.focus(&self.picker_focus);
+        }
+        open
+    }
+
+    fn close_pane_inner(
+        &mut self,
+        id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some((wix, tix)) = self.locate_pane(id) else {
             return true;
         };
@@ -2508,16 +2540,28 @@ impl OmniPTY {
         let Some(id) = self.notification_routes.remove(&key) else {
             return false;
         };
+        if self.reveal_pane(id, window, cx) {
+            cx.activate(true);
+            window.activate_window();
+        }
+        true
+    }
+
+    /// Bring a pane to the front wherever it lives — its workspace, its
+    /// tab, then focus. False if it's gone.
+    fn reveal_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some((wix, tix)) = self.locate_pane(id) else {
-            return true;
+            return false;
         };
+        let moved = wix != self.active_ws || tix != self.workspaces[wix].active_tab;
         self.active_ws = wix;
         self.ws_selected = wix;
         self.workspaces[wix].active_tab = tix;
-        self.workspaces[wix].tabs[tix].active = id;
-        cx.activate(true);
-        window.activate_window();
+        // `focus_pane` makes it the tab's active pane.
         self.focus_pane(id, window, cx);
+        if moved {
+            self.save_workspaces(cx);
+        }
         true
     }
 
@@ -2621,6 +2665,7 @@ impl OmniPTY {
             Overlay::ThemePicker(t) => t.return_focus,
             Overlay::History(h) => h.return_focus,
             Overlay::FileFinder(f) => f.return_focus,
+            Overlay::Navigator(n) => n.return_focus,
             Overlay::Prompt(p) => p.return_focus,
             Overlay::Confirm(c) => c.return_focus,
             Overlay::StartupCommand(s) => s.return_focus,
@@ -2637,6 +2682,7 @@ impl OmniPTY {
             Some(Overlay::Palette(_)) => self.palette_move(delta, cx),
             Some(Overlay::History(_)) => self.history_move(delta, cx),
             Some(Overlay::FileFinder(_)) => self.finder_move(delta, cx),
+            Some(Overlay::Navigator(_)) => self.navigator_move(delta, cx),
             Some(Overlay::StartupEditor(_)) => self.startup_editor_move(delta, cx),
             Some(
                 Overlay::Prompt(_)
@@ -2654,6 +2700,7 @@ impl OmniPTY {
             Some(Overlay::Palette(_)) => self.palette_confirm(window, cx),
             Some(Overlay::History(_)) => self.history_confirm(false, window, cx),
             Some(Overlay::FileFinder(_)) => self.finder_confirm(FinderAction::Open, window, cx),
+            Some(Overlay::Navigator(_)) => self.navigator_confirm(window, cx),
             Some(Overlay::Prompt(_)) => self.prompt_confirm(window, cx),
             Some(Overlay::Confirm(_)) => self.confirm_run(window, cx),
             Some(Overlay::StartupCommand(_)) => self.startup_command_confirm(window, cx),
@@ -2702,6 +2749,7 @@ impl OmniPTY {
                 Overlay::Palette(_)
                 | Overlay::History(_)
                 | Overlay::FileFinder(_)
+                | Overlay::Navigator(_)
                 | Overlay::Prompt(_)
                 | Overlay::Confirm(_)
                 | Overlay::StartupCommand(_)
@@ -2718,6 +2766,7 @@ impl OmniPTY {
             Some(Overlay::Palette(p)) => Some(&mut p.query),
             Some(Overlay::History(h)) => Some(&mut h.query),
             Some(Overlay::FileFinder(f)) => Some(&mut f.query),
+            Some(Overlay::Navigator(n)) => Some(&mut n.query),
             Some(Overlay::Prompt(p)) => Some(&mut p.buffer),
             Some(Overlay::StartupCommand(s)) => Some(&mut s.buffer),
             Some(Overlay::StartupEditor(e)) => e.rows.get_mut(e.selected).map(|r| &mut r.command),
@@ -3685,6 +3734,7 @@ impl OmniPTY {
             Some(Overlay::Palette(_)) => self.palette_refresh(),
             Some(Overlay::History(_)) => self.history_refresh(cx),
             Some(Overlay::FileFinder(_)) => self.finder_refresh(),
+            Some(Overlay::Navigator(_)) => self.navigator_refresh(false, cx),
             _ => {}
         }
         cx.notify();
@@ -4055,6 +4105,275 @@ impl OmniPTY {
         }
         let command = editor_command(path, at, &shell, self.config.editor.open_at_line.as_deref());
         self.run_at_prompt(command, window, cx);
+    }
+
+    // --- Go To: workspaces, tabs, panes (cmd-shift-g) ---
+
+    fn toggle_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.overlay {
+            Some(Overlay::Navigator(_)) => self.close_overlay(window, cx),
+            Some(Overlay::ThemePicker(_)) => {
+                self.picker_cancel(window, cx);
+                self.open_navigator(window, cx);
+            }
+            Some(_) => {
+                self.close_overlay(window, cx);
+                self.open_navigator(window, cx);
+            }
+            None => self.open_navigator(window, cx),
+        }
+    }
+
+    fn open_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let return_focus = self.current_focus_target(window, cx);
+        self.overlay = Some(Overlay::Navigator(NavigatorState {
+            query: LineEdit::default(),
+            tree: navigator::Rows::default(),
+            scroll: 0,
+            return_focus,
+        }));
+        self.navigator_refresh(false, cx);
+        window.focus(&self.picker_focus);
+        cx.notify();
+    }
+
+    /// Every workspace, tab, and pane as plain data, in the order the
+    /// drawer, tab bar, and screen show them.
+    fn navigator_snapshot(&self, cx: &Context<Self>) -> Vec<navigator::WorkspaceSnap> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .map(|(wix, ws)| navigator::WorkspaceSnap {
+                name: ws.name.clone(),
+                active: wix == self.active_ws,
+                tabs: ws
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(tix, tab)| navigator::TabSnap {
+                        title: self.tab_title(tab, cx),
+                        active: tix == ws.active_tab,
+                        panes: tab
+                            .layout
+                            .leaves()
+                            .into_iter()
+                            .map(|id| {
+                                let p = self.panes.get(&id).map(|p| p.read(cx));
+                                navigator::PaneSnap {
+                                    id,
+                                    cwd: p.and_then(|p| p.cwd.clone()),
+                                    program: p
+                                        .and_then(|p| p.foreground.as_ref())
+                                        .filter(|fg| !fg.is_shell())
+                                        .map(|fg| fg.label()),
+                                    osc_title: p.map(|p| p.title.clone()).unwrap_or_default(),
+                                    last_command: p.and_then(|p| {
+                                        p.log.entries().rev().find_map(|c| c.text.clone())
+                                    }),
+                                    active: id == tab.active,
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Rebuild the tree from live state: a pane can `cd` or finish a
+    /// command while the overlay is open, and a few dozen rows are nothing
+    /// next to a repaint. `keep` holds the cursor on the row it was on
+    /// (the query didn't change, the world did); otherwise the best match
+    /// takes it.
+    fn navigator_refresh(&mut self, keep: bool, cx: &Context<Self>) {
+        let snapshot = self.navigator_snapshot(cx);
+        let Some(Overlay::Navigator(n)) = &mut self.overlay else {
+            return;
+        };
+        let was = n.tree.rows.get(n.tree.selected).map(|r| (r.depth, r.pane));
+        n.tree = navigator::build_rows(&n.query.text, &snapshot);
+        if keep
+            && let Some(ix) = n
+                .tree
+                .rows
+                .iter()
+                .position(|r| Some((r.depth, r.pane)) == was)
+        {
+            n.tree.selected = ix;
+            n.scroll = n.scroll.min(ix);
+            if ix >= n.scroll + NAVIGATOR_ROWS {
+                n.scroll = ix + 1 - NAVIGATOR_ROWS;
+            }
+            return;
+        }
+        n.scroll = (n.tree.selected + 1).saturating_sub(NAVIGATOR_ROWS);
+    }
+
+    fn navigator_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(Overlay::Navigator(n)) = &mut self.overlay else {
+            return;
+        };
+        let count = n.tree.rows.len();
+        if count == 0 {
+            return;
+        }
+        let selected = (n.tree.selected as isize + delta).rem_euclid(count as isize) as usize;
+        n.tree.selected = selected;
+        if selected < n.scroll {
+            n.scroll = selected;
+        } else if selected >= n.scroll + NAVIGATOR_ROWS {
+            n.scroll = selected + 1 - NAVIGATOR_ROWS;
+        }
+        cx.notify();
+    }
+
+    /// Go to the selected row's pane (a workspace's or tab's active pane,
+    /// or the pane itself) by id — the tree's indices may be stale.
+    fn navigator_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Overlay::Navigator(n)) = &self.overlay else {
+            return;
+        };
+        let id = n.tree.rows.get(n.tree.selected).and_then(|r| r.pane);
+        if id.is_some_and(|id| self.reveal_pane(id, window, cx)) {
+            // The pane has focus now; closing through `close_overlay`
+            // would hand it back to where the overlay was opened from.
+            self.overlay = None;
+        } else {
+            // Gone while the overlay was up: show the tree as it is now.
+            self.navigator_refresh(true, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_navigator_body(&self, n: &NavigatorState, cx: &Context<Self>) -> gpui::Div {
+        let theme = &self.theme;
+        let accent = theme.ansi[4];
+        let dim = blend(theme.foreground, theme.background, 0.45);
+        let border = blend(theme.foreground, theme.background, 0.85);
+
+        let input = div()
+            .flex_none()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(div().text_color(accent).child("⌕"))
+            .child(self.render_line_edit(&n.query, "workspace, tab, directory, or program…", cx));
+
+        let rows = &n.tree.rows;
+        let mut list = div().flex().flex_col().p_1().gap(px(1.0));
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .mx_2()
+                    .my_1()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.ansi[1])
+                    .text_color(dim)
+                    .child("no workspace, tab, or pane matches"),
+            );
+        }
+        let end = (n.scroll + NAVIGATOR_ROWS).min(rows.len());
+        for (ix, row) in rows.iter().enumerate().take(end).skip(n.scroll) {
+            let is_selected = ix == n.tree.selected;
+            let glyph = match row.target {
+                navigator::Target::Workspace(_) => "▣",
+                navigator::Target::Tab(..) => "▭",
+                navigator::Target::Pane(..) => "▸",
+            };
+            list = list.child(
+                div()
+                    .id(("navigator-item", ix))
+                    .pl(px(12.0 + 14.0 * f32::from(row.depth)))
+                    .pr_3()
+                    .py_1()
+                    .rounded_md()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .when(is_selected, |d| d.bg(theme.selection_bg))
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _w, cx| {
+                        if let Some(Overlay::Navigator(n)) = &mut this.overlay
+                            && n.tree.selected != ix
+                        {
+                            n.tree.selected = ix;
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
+                            if let Some(Overlay::Navigator(n)) = &mut this.overlay {
+                                n.tree.selected = ix;
+                            }
+                            this.navigator_confirm(window, cx);
+                        }),
+                    )
+                    .child(div().flex_none().text_color(dim).child(glyph))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            // Only here to give a match its place in the tree.
+                            .when(row.score.is_none(), |d| d.text_color(dim))
+                            .child(highlighted_text(&row.label, &row.highlights, accent)),
+                    )
+                    .when_some(row.detail.clone(), |d, detail| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(220.0))
+                                .overflow_hidden()
+                                .text_size(px(11.0))
+                                .text_color(dim)
+                                .child(detail),
+                        )
+                    })
+                    .when(row.current, |d| {
+                        d.child(div().flex_none().text_color(accent).child("●"))
+                    }),
+            );
+        }
+        if rows.len() > NAVIGATOR_ROWS {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_0p5()
+                    .text_size(px(11.0))
+                    .text_color(dim)
+                    .child(format!("{} of {}", n.tree.selected + 1, rows.len())),
+            );
+        }
+
+        let footer = div()
+            .flex_none()
+            .px_3()
+            .py_1()
+            .border_t_1()
+            .border_color(border)
+            .text_size(px(11.0))
+            .text_color(dim)
+            .child(format!(
+                "↑↓ move · {}esc close · {} of {} panes match",
+                self.overlay_hints(&[("overlay::confirm", "go")]),
+                n.tree.matched_panes,
+                n.tree.total_panes,
+            ));
+
+        div()
+            .flex()
+            .flex_col()
+            .child(input)
+            .child(list)
+            .child(footer)
     }
 
     // --- Command history (cmd-r) ---
@@ -4532,6 +4851,11 @@ impl OmniPTY {
                 .track_focus(&self.picker_focus)
                 .on_key_down(cx.listener(Self::on_overlay_key_down))
                 .child(self.render_finder_body(f, cx)),
+            Overlay::Navigator(n) => panel
+                .w(px(640.0))
+                .track_focus(&self.picker_focus)
+                .on_key_down(cx.listener(Self::on_overlay_key_down))
+                .child(self.render_navigator_body(n, cx)),
             Overlay::Prompt(p) => panel
                 .w(px(420.0))
                 .track_focus(&self.picker_focus)
@@ -4788,17 +5112,8 @@ impl OmniPTY {
         {
             return fg.label();
         }
-        let cwd = pane.cwd.clone();
-        match cwd {
-            Some(p) => {
-                if home_dir().is_some_and(|h| h == p) {
-                    "~".into()
-                } else {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "/".into())
-                }
-            }
+        match &pane.cwd {
+            Some(p) => dir_name(p, home_dir().as_deref()),
             None => "shell".into(),
         }
     }
@@ -6115,12 +6430,23 @@ fn walk_files(root: &Path, respect_gitignore: bool, show_hidden: bool) -> (Vec<S
 
 /// A palette row's title with the matched characters picked out.
 /// `$HOME` as `~`, for compact directory labels.
-fn pretty_path(path: &Path, home: Option<&Path>) -> String {
+pub(crate) fn pretty_path(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".into(),
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
+}
+
+/// A directory's short name for tab titles and the like: `~` for home,
+/// the last component otherwise, `/` for the root.
+pub(crate) fn dir_name(path: &Path, home: Option<&Path>) -> String {
+    if home.is_some_and(|h| h == path) {
+        return "~".into();
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into())
 }
 
 /// Text with the matched character positions picked out in the accent.
@@ -6611,6 +6937,9 @@ impl Render for OmniPTY {
             }))
             .on_action(cx.listener(|this, _: &FileFinder, window, cx| {
                 this.toggle_finder(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoTo, window, cx| {
+                this.toggle_navigator(window, cx);
             }))
             .on_action(cx.listener(|this, _: &RevealInTree, window, cx| {
                 let Some(cwd) = this.active_pane().read(cx).cwd.clone() else {

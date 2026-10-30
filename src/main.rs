@@ -6,6 +6,7 @@ mod git;
 mod keymap;
 mod line_edit;
 mod markdown;
+mod navigator;
 mod notifications;
 mod palette;
 mod panes;
@@ -98,6 +99,7 @@ pub(crate) fn menus() -> Vec<Menu> {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Command Palette…", CommandPalette),
+                MenuItem::action("Go to Workspace, Tab, or Pane…", GoTo),
                 MenuItem::separator(),
                 MenuItem::action("Toggle File Tree", ToggleDrawer),
                 MenuItem::action("Focus File Tree", FocusTree),
