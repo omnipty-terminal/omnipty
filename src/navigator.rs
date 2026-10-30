@@ -56,6 +56,10 @@ impl Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub target: Target,
+    /// The pane ⏎ lands on: a workspace's active tab's active pane, a
+    /// tab's active pane, the pane itself. Pane ids outlive the indices in
+    /// `target`, which can shift while the overlay is open.
+    pub pane: Option<PaneId>,
     /// 0, 1, 2 — for the indent.
     pub depth: u8,
     pub label: String,
@@ -98,15 +102,6 @@ fn score_fields(
     best
 }
 
-fn basename(cwd: &Path, home: Option<&Path>) -> String {
-    if home.is_some_and(|h| h == cwd) {
-        return "~".into();
-    }
-    cwd.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/".into())
-}
-
 /// Every workspace, tab, and pane that matches `query`, or has a relative
 /// that does, in display order: the tree never reorders by score.
 pub fn build_rows(query: &str, snapshot: &[WorkspaceSnap]) -> Rows {
@@ -121,10 +116,15 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
     for (wix, ws) in snapshot.iter().enumerate() {
         let ws_match = score_fields(&mut matcher, &[(&ws.name, 0)]);
         let mut ws_rows: Vec<Row> = Vec::new();
+        let mut ws_dest = None;
 
         for (tix, tab) in ws.tabs.iter().enumerate() {
             out.total_panes += tab.panes.len();
             let tab_match = score_fields(&mut matcher, &[(&tab.title, 0)]);
+            let tab_dest = tab.panes.iter().find(|p| p.active).or(tab.panes.first());
+            if tab.active || ws_dest.is_none() {
+                ws_dest = tab_dest.map(|p| p.id);
+            }
             let tab_kept = ws_match.is_some() || tab_match.is_some();
 
             let mut pane_rows: Vec<Row> = Vec::new();
@@ -134,7 +134,7 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
                     None if !pane.osc_title.is_empty() => pane.osc_title.clone(),
                     None => "shell".into(),
                 };
-                let base = pane.cwd.as_deref().map(|c| basename(c, home));
+                let base = pane.cwd.as_deref().map(|c| crate::app::dir_name(c, home));
                 // Fields best-first; later ones pay a small penalty so a
                 // basename hit outranks the same characters deep in a path.
                 let mut fields: Vec<(&str, i32)> = Vec::new();
@@ -156,10 +156,13 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
                     // basename is the label's tail, the full path is the
                     // label itself, and the rest are hidden fields.
                     let highlights = match (ix, &base) {
-                        (0, Some(b)) => {
-                            let offset = label.chars().count() - b.chars().count();
-                            hl.into_iter().map(|p| p + offset).collect()
-                        }
+                        (0, Some(b)) => match label.rfind(b.as_str()) {
+                            Some(at) => {
+                                let offset = label[..at].chars().count();
+                                hl.into_iter().map(|p| p + offset).collect()
+                            }
+                            None => Vec::new(),
+                        },
                         (1, Some(_)) | (0, None) => hl,
                         _ => Vec::new(),
                     };
@@ -172,6 +175,7 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
                     };
                     pane_rows.push(Row {
                         target: Target::Pane(wix, tix, pane.id),
+                        pane: Some(pane.id),
                         depth: 2,
                         label,
                         detail: pane.program.clone().or_else(|| pane.last_command.clone()),
@@ -189,6 +193,7 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
                 };
                 ws_rows.push(Row {
                     target: Target::Tab(wix, tix),
+                    pane: tab_dest.map(|p| p.id),
                     depth: 1,
                     label: tab.title.clone(),
                     detail: (tab.panes.len() > 1).then(|| format!("{} panes", tab.panes.len())),
@@ -209,6 +214,7 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
         };
         out.rows.push(Row {
             target: Target::Workspace(wix),
+            pane: ws_dest,
             depth: 0,
             label: ws.name.clone(),
             detail: None,
@@ -222,7 +228,7 @@ fn build_rows_with_home(query: &str, snapshot: &[WorkspaceSnap], home: Option<&P
     out.matched_panes = out
         .rows
         .iter()
-        .filter(|r| matches!(r.target, Target::Pane(..)))
+        .filter(|r| matches!(r.target, Target::Pane(..)) && r.score.is_some())
         .count();
     // With no query every score is 0 and the current pane is the answer.
     // Otherwise the highest score wins; ties go to the deeper row (a pane
@@ -336,6 +342,14 @@ mod tests {
         assert!(r.rows[2].score.is_some());
         assert_eq!(r.selected, 2);
         assert_eq!((r.matched_panes, r.total_panes), (1, 6));
+        // Every row knows the pane it lands on.
+        assert_eq!(
+            r.rows[0].pane,
+            Some(1),
+            "workspace → active tab's active pane"
+        );
+        assert_eq!(r.rows[1].pane, Some(1));
+        assert_eq!(r.rows[2].pane, Some(2));
     }
 
     #[test]
@@ -352,6 +366,11 @@ mod tests {
             ]
         );
         assert_eq!(r.selected, 0);
+        // Only the workspace matched; the two panes listed under it
+        // are there for context, not counted.
+        assert_eq!(r.matched_panes, 0);
+        // No active tab flagged: fall back to the first tab's first pane.
+        assert_eq!(r.rows[0].pane, Some(3));
     }
 
     #[test]
@@ -397,6 +416,15 @@ mod tests {
         assert_eq!(sel.highlights, vec![6, 7, 8]);
         // The path-only hit is highlighted where it lands in the path.
         assert_eq!(r.rows[2].highlights, vec![6, 7, 8]);
+    }
+
+    #[test]
+    fn basename_highlight_survives_a_trailing_slash() {
+        let snap = vec![ws("w", vec![tab("t", vec![pane(1, "/srv/api/")])])];
+        let r = rows("api", &snap);
+        let sel = &r.rows[r.selected];
+        assert_eq!(sel.label, "/srv/api/");
+        assert_eq!(sel.highlights, vec![5, 6, 7]);
     }
 
     #[test]

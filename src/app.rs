@@ -1417,9 +1417,11 @@ impl OmniPTY {
     /// caller decides whether that closes the window.
     fn close_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let open = self.close_pane_inner(id, window, cx);
-        // A pane that exits under the Go To overlay drops out of its tree.
+        // A pane that exits under the Go To overlay drops out of its tree;
+        // the close focused its neighbour, so take focus back.
         if matches!(self.overlay, Some(Overlay::Navigator(_))) {
-            self.navigator_refresh(cx);
+            self.navigator_refresh(true, cx);
+            window.focus(&self.picker_focus);
         }
         open
     }
@@ -2538,9 +2540,10 @@ impl OmniPTY {
         let Some(id) = self.notification_routes.remove(&key) else {
             return false;
         };
-        cx.activate(true);
-        window.activate_window();
-        self.reveal_pane(id, window, cx);
+        if self.reveal_pane(id, window, cx) {
+            cx.activate(true);
+            window.activate_window();
+        }
         true
     }
 
@@ -2550,12 +2553,15 @@ impl OmniPTY {
         let Some((wix, tix)) = self.locate_pane(id) else {
             return false;
         };
+        let moved = wix != self.active_ws || tix != self.workspaces[wix].active_tab;
         self.active_ws = wix;
         self.ws_selected = wix;
         self.workspaces[wix].active_tab = tix;
-        self.workspaces[wix].tabs[tix].active = id;
+        // `focus_pane` makes it the tab's active pane.
         self.focus_pane(id, window, cx);
-        self.save_workspaces(cx);
+        if moved {
+            self.save_workspaces(cx);
+        }
         true
     }
 
@@ -3728,7 +3734,7 @@ impl OmniPTY {
             Some(Overlay::Palette(_)) => self.palette_refresh(),
             Some(Overlay::History(_)) => self.history_refresh(cx),
             Some(Overlay::FileFinder(_)) => self.finder_refresh(),
-            Some(Overlay::Navigator(_)) => self.navigator_refresh(cx),
+            Some(Overlay::Navigator(_)) => self.navigator_refresh(false, cx),
             _ => {}
         }
         cx.notify();
@@ -4126,7 +4132,7 @@ impl OmniPTY {
             scroll: 0,
             return_focus,
         }));
-        self.navigator_refresh(cx);
+        self.navigator_refresh(false, cx);
         window.focus(&self.picker_focus);
         cx.notify();
     }
@@ -4176,13 +4182,30 @@ impl OmniPTY {
 
     /// Rebuild the tree from live state: a pane can `cd` or finish a
     /// command while the overlay is open, and a few dozen rows are nothing
-    /// next to a repaint.
-    fn navigator_refresh(&mut self, cx: &Context<Self>) {
+    /// next to a repaint. `keep` holds the cursor on the row it was on
+    /// (the query didn't change, the world did); otherwise the best match
+    /// takes it.
+    fn navigator_refresh(&mut self, keep: bool, cx: &Context<Self>) {
         let snapshot = self.navigator_snapshot(cx);
         let Some(Overlay::Navigator(n)) = &mut self.overlay else {
             return;
         };
+        let was = n.tree.rows.get(n.tree.selected).map(|r| (r.depth, r.pane));
         n.tree = navigator::build_rows(&n.query.text, &snapshot);
+        if keep
+            && let Some(ix) = n
+                .tree
+                .rows
+                .iter()
+                .position(|r| Some((r.depth, r.pane)) == was)
+        {
+            n.tree.selected = ix;
+            n.scroll = n.scroll.min(ix);
+            if ix >= n.scroll + NAVIGATOR_ROWS {
+                n.scroll = ix + 1 - NAVIGATOR_ROWS;
+            }
+            return;
+        }
         n.scroll = (n.tree.selected + 1).saturating_sub(NAVIGATOR_ROWS);
     }
 
@@ -4204,35 +4227,20 @@ impl OmniPTY {
         cx.notify();
     }
 
-    /// Go to the selected row. A workspace lands on its active tab's active
-    /// pane, a tab on its active pane; every case ends in `reveal_pane`.
+    /// Go to the selected row's pane (a workspace's or tab's active pane,
+    /// or the pane itself) by id — the tree's indices may be stale.
     fn navigator_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Overlay::Navigator(n)) = &self.overlay else {
             return;
         };
-        let Some(row) = n.tree.rows.get(n.tree.selected) else {
-            return;
-        };
-        let tab_active = |w: usize, t: usize| {
-            self.workspaces
-                .get(w)
-                .and_then(|ws| ws.tabs.get(t))
-                .map(|tab| tab.active)
-        };
-        let id = match row.target {
-            navigator::Target::Workspace(w) => {
-                tab_active(w, self.workspaces.get(w).map_or(0, |ws| ws.active_tab))
-            }
-            navigator::Target::Tab(w, t) => tab_active(w, t),
-            navigator::Target::Pane(_, _, id) => Some(id),
-        };
+        let id = n.tree.rows.get(n.tree.selected).and_then(|r| r.pane);
         if id.is_some_and(|id| self.reveal_pane(id, window, cx)) {
             // The pane has focus now; closing through `close_overlay`
             // would hand it back to where the overlay was opened from.
             self.overlay = None;
         } else {
             // Gone while the overlay was up: show the tree as it is now.
-            self.navigator_refresh(cx);
+            self.navigator_refresh(true, cx);
         }
         cx.notify();
     }
@@ -5104,17 +5112,8 @@ impl OmniPTY {
         {
             return fg.label();
         }
-        let cwd = pane.cwd.clone();
-        match cwd {
-            Some(p) => {
-                if home_dir().is_some_and(|h| h == p) {
-                    "~".into()
-                } else {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "/".into())
-                }
-            }
+        match &pane.cwd {
+            Some(p) => dir_name(p, home_dir().as_deref()),
             None => "shell".into(),
         }
     }
@@ -6437,6 +6436,17 @@ pub(crate) fn pretty_path(path: &Path, home: Option<&Path>) -> String {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
+}
+
+/// A directory's short name for tab titles and the like: `~` for home,
+/// the last component otherwise, `/` for the root.
+pub(crate) fn dir_name(path: &Path, home: Option<&Path>) -> String {
+    if home.is_some_and(|h| h == path) {
+        return "~".into();
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into())
 }
 
 /// Text with the matched character positions picked out in the accent.
