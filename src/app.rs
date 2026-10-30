@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -219,6 +220,21 @@ pub struct OmniPTY {
     drawer_width: Option<f32>,
     /// The drawer's edge is being dragged.
     drawer_drag: bool,
+    /// The tree's share of the drawer as last dragged; `tree.height`
+    /// until it has been.
+    tree_split: Option<f32>,
+    /// The line between the tree and the workspaces is being dragged.
+    split_drag: bool,
+    /// Where the drawer was last laid out, for mapping a split drag's
+    /// pointer to a share of its height.
+    drawer_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Keeps the selected workspace row in view when the list overflows.
+    ws_scroll: gpui::ScrollHandle,
+    /// The row `ws_scroll` was last asked to show, so a wheel scroll away
+    /// from it sticks until the selection moves.
+    ws_scrolled_to: Option<usize>,
+    /// The drawer has been painted at least once. Set by its canvas.
+    drawer_painted: Rc<Cell<bool>>,
     /// `window.opacity < 1` and `window.blur` as the window last had them
     /// applied, so a config reload can change either.
     translucency: Option<(bool, bool)>,
@@ -546,11 +562,23 @@ pub fn load_window_bounds() -> Option<gpui::Bounds<gpui::Pixels>> {
     })
 }
 
-/// The width the drawer was last dragged to: a fifth number after the
-/// window's bounds, there only once it has been dragged.
-fn load_drawer_width() -> Option<f32> {
-    let text = std::fs::read_to_string(window_state_path()?).ok()?;
-    text.split_whitespace().nth(4)?.parse().ok()
+/// What the drawer was last dragged to, after the window's bounds: its
+/// width, then the tree's share of it. Each is there only once it has
+/// been dragged (`-` holds the width's place if only the share was).
+fn load_drawer_state() -> (Option<f32>, Option<f32>) {
+    let Some(text) = window_state_path().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return (None, None);
+    };
+    let mut fields = text.split_whitespace().skip(4);
+    let mut next = || fields.next().and_then(|f| f.parse().ok());
+    (next(), next())
+}
+
+/// Neither half of the drawer squeezed out of use. `max`/`min` rather
+/// than `clamp` so a NaN (a `0/0` drag) comes out as a number.
+#[allow(clippy::manual_clamp)]
+fn clamp_tree_split(share: f32) -> f32 {
+    share.max(0.1).min(0.9)
 }
 
 /// No narrower than its rows are useful, no wider than leaves the terminal
@@ -802,6 +830,7 @@ impl OmniPTY {
         let config_error = config_error.or_else(|| resolved.error_banner());
 
         let drawer_visible = config.tree.open_on_startup;
+        let (drawer_width, tree_split) = load_drawer_state();
         let mut this = Self {
             config,
             theme,
@@ -821,8 +850,14 @@ impl OmniPTY {
             next_pane_id: 0,
             pane_subscriptions: HashMap::new(),
             drawer_visible,
-            drawer_width: load_drawer_width(),
+            drawer_width,
             drawer_drag: false,
+            tree_split,
+            split_drag: false,
+            drawer_bounds: Rc::default(),
+            ws_scroll: gpui::ScrollHandle::new(),
+            ws_scrolled_to: None,
+            drawer_painted: Rc::default(),
             translucency: None,
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -1798,7 +1833,13 @@ impl OmniPTY {
         }
     }
 
-    /// The window's bounds, then the drawer's width once it has been dragged.
+    /// The tree's share of the drawer: as dragged, else `tree.height`.
+    fn tree_split(&self) -> f32 {
+        clamp_tree_split(self.tree_split.unwrap_or(self.config.tree.height / 100.0))
+    }
+
+    /// The window's bounds, then the drawer's width and the tree's share
+    /// of it once either has been dragged.
     fn write_window_state(&self) {
         let (Some(b), Some(path)) = (self.last_bounds, window_state_path()) else {
             return;
@@ -1810,8 +1851,11 @@ impl OmniPTY {
             f32::from(b.size.width),
             f32::from(b.size.height)
         );
-        if let Some(width) = self.drawer_width {
-            state.push_str(&format!(" {width}"));
+        match (self.drawer_width, self.tree_split) {
+            (Some(width), Some(split)) => state.push_str(&format!(" {width} {split}")),
+            (Some(width), None) => state.push_str(&format!(" {width}")),
+            (None, Some(split)) => state.push_str(&format!(" - {split}")),
+            (None, None) => {}
         }
         let _ = std::fs::create_dir_all(path.parent().unwrap());
         let _ = std::fs::write(path, state);
@@ -1828,8 +1872,15 @@ impl OmniPTY {
                 let keymap_changed = new_config.keymap != self.config.keymap;
                 // A new `tree.width` is a request for that width, dragged
                 // or not.
-                if new_config.tree.width != self.config.tree.width {
+                let width_changed = new_config.tree.width != self.config.tree.width;
+                let height_changed = new_config.tree.height != self.config.tree.height;
+                if width_changed {
                     self.drawer_width = None;
+                }
+                if height_changed {
+                    self.tree_split = None;
+                }
+                if width_changed || height_changed {
                     self.write_window_state();
                 }
                 if self.config.crash_reports.enabled && !new_config.crash_reports.enabled {
@@ -5000,7 +5051,9 @@ impl OmniPTY {
     }
 
     fn end_divider_drag(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.drawer_drag) {
+        let drawer = std::mem::take(&mut self.drawer_drag);
+        let split = std::mem::take(&mut self.split_drag);
+        if drawer || split {
             self.write_window_state();
             cx.notify();
         }
@@ -5063,6 +5116,7 @@ impl OmniPTY {
         // A pane divider, or the drawer's edge.
         let cursor = match &self.divider_drag {
             Some(drag) if drag.axis == Axis::Vertical => gpui::CursorStyle::ResizeUpDown,
+            None if self.split_drag => gpui::CursorStyle::ResizeUpDown,
             _ => gpui::CursorStyle::ResizeLeftRight,
         };
         // Sits over everything while dragging so the pointer can leave the
@@ -5081,6 +5135,13 @@ impl OmniPTY {
                     this.drawer_width =
                         Some(clamp_drawer_width(f32::from(ev.position.x), window_width));
                     cx.notify();
+                } else if this.split_drag {
+                    if let Some(b) = this.drawer_bounds.get() {
+                        let share =
+                            f32::from(ev.position.y - b.origin.y) / f32::from(b.size.height);
+                        this.tree_split = Some(clamp_tree_split(share));
+                        cx.notify();
+                    }
                 } else {
                     this.update_divider_drag(ev.position, cx);
                 }
@@ -5633,7 +5694,14 @@ impl OmniPTY {
         let dim = blend(theme.foreground, theme.background, 0.45);
         let border = blend(theme.foreground, theme.background, 0.85);
 
-        let mut list = div().flex_1().min_h_0().flex().flex_col().overflow_hidden();
+        let mut list = div()
+            .id("ws-list")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .track_scroll(&self.ws_scroll);
         for (ix, w) in self.workspaces.iter().enumerate() {
             let is_active = ix == self.active_ws;
             let is_selected = focused && ix == self.ws_selected;
@@ -6714,6 +6782,20 @@ impl Render for OmniPTY {
         let tree_focused = self.tree_focus(cx).is_focused(window);
         let accent = theme.ansi[4];
         let drawer_width = self.drawer_width(window);
+        let tree_split = self.tree_split();
+        // Wherever the selection moved — keys, a click, Go To, a close —
+        // the workspaces list scrolls to it here, once per move.
+        if self.drawer_visible && self.ws_scrolled_to != Some(self.ws_selected) {
+            self.ws_scroll.scroll_to_item(self.ws_selected);
+            if self.drawer_painted.get() {
+                self.ws_scrolled_to = Some(self.ws_selected);
+            } else {
+                // GPUI records the list's overflow at paint, after prepaint
+                // has already acted on (and, before the first paint,
+                // dropped) the request. Ask again next frame.
+                window.request_animation_frame();
+            }
+        }
         // Like the pane dividers' grab areas: not under a modal or a menu.
         let drawer_resizable = self.drawer_visible
             && self.overlay.is_none()
@@ -7031,15 +7113,61 @@ impl Render for OmniPTY {
                                     })
                                     .flex()
                                     .flex_col()
-                                    // 50/50: file tree above, workspaces below.
+                                    .relative()
+                                    // File tree above, workspaces below,
+                                    // split at `tree.height` or where it
+                                    // was dragged.
                                     .child(
                                         div()
-                                            .flex_1()
+                                            .flex_none()
+                                            .h(gpui::relative(tree_split))
                                             .min_h_0()
                                             .overflow_hidden()
                                             .child(self.tree.clone()),
                                     )
                                     .child(self.render_workspace_panel(window, cx).bg(background))
+                                    .child({
+                                        // Where the drawer is, for the split drag.
+                                        let bounds = self.drawer_bounds.clone();
+                                        let painted = self.drawer_painted.clone();
+                                        gpui::canvas(
+                                            move |b, _, _| bounds.set(Some(b)),
+                                            move |_, _, _, _| painted.set(true),
+                                        )
+                                        .absolute()
+                                        .inset_0()
+                                    })
+                                    // The line between them drags like the
+                                    // drawer's edge.
+                                    .when(drawer_resizable, |d| {
+                                        d.child(
+                                            div()
+                                                .id("split-resize")
+                                                .absolute()
+                                                .left_0()
+                                                .right_0()
+                                                .top(gpui::relative(tree_split))
+                                                .mt(px(-3.0))
+                                                .h(px(7.0))
+                                                .cursor(gpui::CursorStyle::ResizeUpDown)
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    cx.listener(
+                                                        |this, ev: &gpui::MouseDownEvent, _w, cx| {
+                                                            cx.stop_propagation();
+                                                            if ev.click_count > 1 {
+                                                                // Double-click: back to `tree.height`.
+                                                                this.tree_split = None;
+                                                                this.write_window_state();
+                                                            } else {
+                                                                this.split_drag = true;
+                                                            }
+                                                            cx.notify();
+                                                        },
+                                                    ),
+                                                ),
+                                        )
+                                    })
                             }),
                     )
                     .child(
@@ -7167,9 +7295,10 @@ impl Render for OmniPTY {
             .when(self.app_menu.is_some(), |d| {
                 d.child(self.render_app_menu(window, cx))
             })
-            .when(self.divider_drag.is_some() || self.drawer_drag, |d| {
-                d.child(self.render_drag_overlay(cx))
-            })
+            .when(
+                self.divider_drag.is_some() || self.drawer_drag || self.split_drag,
+                |d| d.child(self.render_drag_overlay(cx)),
+            )
             .when(self.overlay.is_some(), |d| d.child(self.render_overlay(cx)))
             // Another app is frontmost: a shade in the background's colour,
             // over the whole window. Takes no mouse events, so the first
@@ -7223,6 +7352,14 @@ mod reorder_tests {
         assert_eq!(clamp_drawer_width(1190.0, 1200.0), 960.0);
         // A window too small for both: the drawer keeps its minimum.
         assert_eq!(clamp_drawer_width(400.0, 300.0), 160.0);
+    }
+
+    #[test]
+    fn the_tree_split_leaves_both_halves_usable() {
+        assert_eq!(clamp_tree_split(0.0), 0.1);
+        assert_eq!(clamp_tree_split(0.75), 0.75);
+        assert_eq!(clamp_tree_split(2.0), 0.9);
+        assert_eq!(clamp_tree_split(f32::NAN), 0.1);
     }
 }
 

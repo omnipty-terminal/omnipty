@@ -681,6 +681,9 @@ pub enum OptionAsMeta {
 #[serde(default, deny_unknown_fields)]
 pub struct TreeConfig {
     pub width: f32,
+    /// The file tree's share of the drawer, in percent; the workspaces
+    /// panel gets the rest.
+    pub height: f32,
     pub show_hidden: bool,
     pub respect_gitignore: bool,
     pub indent: f32,
@@ -698,6 +701,7 @@ impl Default for TreeConfig {
     fn default() -> Self {
         Self {
             width: 280.0,
+            height: 50.0,
             show_hidden: false,
             respect_gitignore: true,
             indent: 16.0,

@@ -91,6 +91,9 @@ fn validate(config: &Config) -> Option<String> {
     if !(0.0..=1.0).contains(&config.cursor.thickness) {
         return Some("cursor.thickness must be between 0 and 1 (a fraction of a cell)".into());
     }
+    if !(10.0..=90.0).contains(&config.tree.height) {
+        return Some("tree.height must be between 10 and 90 (percent of the drawer)".into());
+    }
     None
 }
 
@@ -210,6 +213,7 @@ integration    = true         # OSC 133 markers + silent cd from the file tree.
 
 [tree]
 width             = 280
+height            = 50        # % of the drawer for the file tree; workspaces get the rest
 show_hidden       = false
 respect_gitignore = true      # dim gitignored files in the drawer
 indent            = 16

@@ -342,7 +342,7 @@ pub struct TerminalPane {
     /// Re-renders the preview this pane is paging to a column count,
     /// rewriting the paged file; returns its code blocks. Called when the
     /// pane's width changes so the preview follows a resize.
-    pub preview_render: Option<Box<dyn Fn(usize) -> Option<Vec<String>>>>,
+    pub preview_render: Option<PreviewRender>,
     /// Repo root for the current cwd, looked up on the background pool.
     git_root: Option<PathBuf>,
     git_root_for: Option<PathBuf>,
@@ -384,6 +384,8 @@ pub struct TerminalPane {
     /// restart re-runs it.
     command: Option<Vec<String>>,
 }
+
+type PreviewRender = Box<dyn Fn(usize) -> Option<Vec<String>>>;
 
 struct SearchState {
     query: String,

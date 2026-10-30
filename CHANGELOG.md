@@ -20,6 +20,12 @@ write for users: what changed and why it matters, not which files moved.
   that ran in a pane — shown as a tree with the best match selected. Press
   ⏎ to go there. With nothing typed it lists everything with the current
   pane marked, so ↓↓⏎ is a keyboard pane switcher too.
+- **Resize the split between the file tree and the workspaces.** Drag the
+  line between them; the share is remembered across launches, and
+  double-clicking it snaps back to `tree.height` (a percentage of the drawer
+  for the tree, 50 by default). The workspaces list now scrolls when there
+  are more than fit. (requested by [@jollytoad](https://github.com/jollytoad) 
+  via OmniPTY [Discord](https://discord.gg/APV9FYGgeh))
 
 ### Fixed
 
