@@ -11,6 +11,8 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-30
+
 ### Added
 
 - **Jump to any workspace, tab, or pane by name.** `cmd-shift-g`

@@ -14,8 +14,8 @@ commits.
 ### 2. Make the release commit
 
 ```sh
-./scripts/bump.sh 0.9.2
-git commit -am "release v0.9.2" && git push
+./scripts/bump.sh 0.9.3
+git commit -am "release v0.9.3" && git push
 ```
 
 `bump.sh` does four things, and refuses to run if **Unreleased** in
@@ -111,17 +111,17 @@ If the build succeeded but publishing failed, or you need `--target <sha>` to
 tag a different commit (`gh` rejects abbreviated SHAs; pass the full hash):
 
 ```sh
-cp target/OmniPTY-0.9.2.dmg target/OmniPTY-0.9.2-update.dmg
+cp target/OmniPTY-0.9.3.dmg target/OmniPTY-0.9.3-update.dmg
 minisign -S -s ~/.config/omnipty-release/update.key \
-  -m target/OmniPTY-0.9.2-update.dmg -x target/OmniPTY-0.9.2-update.dmg.macos-aarch64.minisig \
-  -t "omnipty 0.9.2 macos-aarch64"
-for f in OmniPTY-0.9.2.dmg OmniPTY-0.9.2-update.dmg OmniPTY-0.9.2-update.dmg.macos-aarch64.minisig; do
-  npx wrangler r2 object put "omnipty-releases/omnipty/0.9.2/$f" --remote --file "target/$f" \
+  -m target/OmniPTY-0.9.3-update.dmg -x target/OmniPTY-0.9.3-update.dmg.macos-aarch64.minisig \
+  -t "omnipty 0.9.3 macos-aarch64"
+for f in OmniPTY-0.9.3.dmg OmniPTY-0.9.3-update.dmg OmniPTY-0.9.3-update.dmg.macos-aarch64.minisig; do
+  npx wrangler r2 object put "omnipty-releases/omnipty/0.9.3/$f" --remote --file "target/$f" \
     --cache-control "public, max-age=31536000, immutable"
 done
-gh release create v0.9.2 target/OmniPTY-0.9.2-update.dmg target/OmniPTY-0.9.2.dmg \
-  --title "OmniPTY v0.9.2" \
-  --notes "$(sed -n '/^## \[0.9.2\]/,/^## \[/p' CHANGELOG.md | sed '1d;$d')"
+gh release create v0.9.3 target/OmniPTY-0.9.3-update.dmg target/OmniPTY-0.9.3.dmg \
+  --title "OmniPTY v0.9.3" \
+  --notes "$(sed -n '/^## \[0.9.3\]/,/^## \[/p' CHANGELOG.md | sed '1d;$d')"
 ```
 
 Then the manifest. Its shape (the `signature` is the `.minisig` file's contents
@@ -129,21 +129,21 @@ as one JSON string; `jq -Rs . < file.minisig` produces it):
 
 ```json
 {
-  "version": "0.9.2",
-  "pub_date": "2026-10-22T18:00:00Z",
-  "notes_url": "https://omnipty.com/changelog/#v0.9.2",
-  "release_url": "https://github.com/omnipty-terminal/omnipty/releases/tag/v0.9.2",
-  "download_url": "https://downloads.omnipty.com/omnipty/0.9.2/OmniPTY-0.9.2.dmg",
+  "version": "0.9.3",
+  "pub_date": "2026-10-30T18:00:00Z",
+  "notes_url": "https://omnipty.com/changelog/#v0.9.3",
+  "release_url": "https://github.com/omnipty-terminal/omnipty/releases/tag/v0.9.3",
+  "download_url": "https://downloads.omnipty.com/omnipty/0.9.3/OmniPTY-0.9.3.dmg",
   "sha256": "<sha256 of the DMG>",
   "assets": {
     "macos-aarch64": {
-      "url": "https://downloads.omnipty.com/omnipty/0.9.2/OmniPTY-0.9.2-update.dmg",
+      "url": "https://downloads.omnipty.com/omnipty/0.9.3/OmniPTY-0.9.3-update.dmg",
       "size": 11705200,
       "sha256": "<sha256 of the DMG>",
-      "signature": "untrusted comment: …\n…\ntrusted comment: omnipty 0.9.2 macos-aarch64\n…\n"
+      "signature": "untrusted comment: …\n…\ntrusted comment: omnipty 0.9.3 macos-aarch64\n…\n"
     },
     "linux-x86_64": {
-      "url": "https://downloads.omnipty.com/omnipty/0.9.2/omnipty-0.9.2-linux-x86_64.tar.gz",
+      "url": "https://downloads.omnipty.com/omnipty/0.9.3/omnipty-0.9.3-linux-x86_64.tar.gz",
       "size": 8000000,
       "sha256": "<sha256 of the tarball>",
       "signature": "…"
@@ -159,7 +159,7 @@ Linux pill opens; `size` is for the website's download button. Finally
 
 The trusted comment must be exactly `omnipty <version> macos-<arch>` — the
 updater checks it after the signature, so a real signature can't be reused for
-another version. Upload it as `releases/0.9.2.json` (immutable) and
+another version. Upload it as `releases/0.9.3.json` (immutable) and
 `releases/stable.json` (`--cache-control "public, max-age=60"`).
 
 ### 4. The Linux build (on the Linux box)
@@ -172,7 +172,7 @@ on it:
 ```sh
 ssh linux-box
 cd ~/Code/omnipty/omnipty
-git pull --ff-only && git fetch --tags    # HEAD is at (or just past) v0.9.2
+git pull --ff-only && git fetch --tags    # HEAD is at (or just past) v0.9.3
 ./scripts/release-linux.sh
 ```
 
@@ -205,7 +205,7 @@ from scratch and takes a while; later ones reuse `target/docker/`. Commit
 that bump:
 
 ```sh
-git commit -am "aur: omnipty-bin 0.9.2" && git push
+git commit -am "aur: omnipty-bin 0.9.3" && git push
 ```
 
 The package isn't on the AUR yet, so that's the end of the Linux release.
@@ -215,7 +215,7 @@ publishes it:
 ```sh
 cd packaging/aur/omnipty-bin && makepkg --printsrcinfo > .SRCINFO
 cp PKGBUILD .SRCINFO ~/aur/omnipty-bin/
-cd ~/aur/omnipty-bin && git add -A && git commit -m "v0.9.2" && git push
+cd ~/aur/omnipty-bin && git add -A && git commit -m "v0.9.3" && git push
 ```
 
 Before the first push, `makepkg -si` in `packaging/aur/omnipty-bin`
@@ -255,9 +255,9 @@ One-time setup on the Linux box:
 Copies installed as Oxide (0.8.x and earlier) read
 `https://downloads.oxideterminal.com/releases/stable.json` from the old
 `oxide-releases` bucket, and only accept a signature whose trusted comment
-is `oxide <version> macos-<arch>`. That bucket is frozen at the 0.9.2 bridge
+is `oxide <version> macos-<arch>`. That bucket is frozen at the 0.9.3 bridge
 release and is never written by `release.sh`; it carries those copies to
-0.9.2, after which they update from here like everyone else. How it was set
+0.9.3, after which they update from here like everyone else. How it was set
 up is in `support/RENAME_RUNBOOK.md`. Leave it serving.
 
 ## What happens after publishing
@@ -380,7 +380,7 @@ npx wrangler r2 object put omnipty-releases/releases/stable.json --remote --file
   --content-type application/json --cache-control "public, max-age=60"
 ```
 
-— and delete the bad GitHub release (`gh release delete v0.9.2 --yes`).
+— and delete the bad GitHub release (`gh release delete v0.9.3 --yes`).
 Installed copies never downgrade, so anyone who already got the bad build
 needs the next release; ship it as a new version number.
 
@@ -389,7 +389,7 @@ needs the next release; ship it as a new version number.
 - **Never overwrite a published object.** `release.sh` refuses to run if the
   bucket already has this version. A fix goes out as a new version number;
   old versions stay so the cask's pinned URL and rollbacks keep working.
-- **The tag must be `v<Cargo.toml version>`** (e.g. `v0.9.2` for `0.9.2`) and
+- **The tag must be `v<Cargo.toml version>`** (e.g. `v0.9.3` for `0.9.3`) and
   the GitHub release must have a `.dmg` asset, or updaters older than the
   manifest switch ignore it. They prefer `-update.dmg` and fall back to the
   plain one.
