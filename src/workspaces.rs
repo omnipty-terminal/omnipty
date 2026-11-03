@@ -17,7 +17,9 @@
 //! **This file is executable content**: a startup command is a shell
 //! command run at launch. It is written 0600 for that reason.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -220,12 +222,6 @@ fn restrict_permissions(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-pub fn load() -> Vec<SavedWorkspace> {
-    let Some(path) = state_path() else {
-        return Vec::new();
-    };
-    load_from(&path)
-}
 
 pub fn load_from(path: &Path) -> Vec<SavedWorkspace> {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -269,9 +265,99 @@ pub fn load_from(path: &Path) -> Vec<SavedWorkspace> {
         .collect()
 }
 
-pub fn save(workspaces: &[SavedWorkspace]) {
-    let Some(path) = state_path() else { return };
-    save_to(&path, workspaces);
+/// The process-wide set of pinned workspaces. Every window owns a slice of
+/// it and the file on disk is always the union, so a window that was opened
+/// empty (New Window, or a `-e` launch) can't overwrite what the others hold.
+///
+/// Slices nobody owns — read from disk but not restored by any window, or
+/// left behind when a window closes — are kept and written back untouched.
+#[derive(Default)]
+struct Pinned {
+    /// `None` until the file has been read once.
+    unowned: Option<Vec<SavedWorkspace>>,
+    owned: BTreeMap<u64, Vec<SavedWorkspace>>,
+    next_id: u64,
+}
+
+impl Pinned {
+    fn unowned(&mut self, path: &Path) -> &mut Vec<SavedWorkspace> {
+        self.unowned.get_or_insert_with(|| load_from(path))
+    }
+
+    fn register(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    /// Hand every unowned workspace to window `id`.
+    fn claim(&mut self, id: u64, path: &Path) -> Vec<SavedWorkspace> {
+        let claimed = std::mem::take(self.unowned(path));
+        self.owned.insert(id, claimed.clone());
+        claimed
+    }
+
+    /// Replace window `id`'s slice and write the union.
+    fn set(&mut self, id: u64, saved: Vec<SavedWorkspace>, path: &Path) {
+        self.unowned(path);
+        self.owned.insert(id, saved);
+        save_to(path, &self.all());
+    }
+
+    /// The window is gone; what it pinned stays pinned.
+    fn release(&mut self, id: u64) {
+        if let Some(mut saved) = self.owned.remove(&id) {
+            self.unowned.get_or_insert_with(Vec::new).append(&mut saved);
+        }
+    }
+
+    fn all(&self) -> Vec<SavedWorkspace> {
+        self.unowned
+            .iter()
+            .flatten()
+            .chain(self.owned.values().flatten())
+            .cloned()
+            .collect()
+    }
+}
+
+static PINNED: Mutex<Pinned> = Mutex::new(Pinned {
+    unowned: None,
+    owned: BTreeMap::new(),
+    next_id: 0,
+});
+
+fn pinned() -> MutexGuard<'static, Pinned> {
+    PINNED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One window's handle on [`Pinned`]. Dropping it (the window closed)
+/// returns its workspaces to the unowned pool.
+pub struct Owner(u64);
+
+impl Owner {
+    pub fn new() -> Self {
+        Owner(pinned().register())
+    }
+
+    /// Take ownership of every pinned workspace no other window has.
+    pub fn restore(&self) -> Vec<SavedWorkspace> {
+        match state_path() {
+            Some(path) => pinned().claim(self.0, &path),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn save(&self, saved: Vec<SavedWorkspace>) {
+        if let Some(path) = state_path() {
+            pinned().set(self.0, saved, &path);
+        }
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        pinned().release(self.0);
+    }
 }
 
 pub fn save_to(path: &Path, workspaces: &[SavedWorkspace]) {
@@ -611,5 +697,44 @@ mod tests {
             on_exit: OnExit::Restart,
         };
         assert_eq!(pane.startup(), None);
+    }
+
+    /// The bug this guards: a second window (New Window, or a `-e` launch)
+    /// starts with nothing pinned; saving its empty set used to delete the
+    /// file, taking the first window's pinned workspaces with it.
+    #[test]
+    fn empty_window_never_overwrites_other_windows_pins() {
+        let dir = temp_dir("registry");
+        let path = dir.join("workspaces.json");
+        std::fs::write(
+            &path,
+            include_str!("../tests/fixtures/workspaces-v0.3.2.json"),
+        )
+        .unwrap();
+        let mut reg = Pinned::default();
+
+        // Window A restores both; window B opens empty and saves nothing.
+        let a = reg.register();
+        let b = reg.register();
+        assert_eq!(reg.claim(a, &path).len(), 2);
+        reg.set(b, Vec::new(), &path);
+        assert_eq!(load_from(&path).len(), 2);
+
+        // A closes: its pins outlive it. B pins one of its own.
+        reg.release(a);
+        let mut mine = sample().remove(0);
+        mine.name = "mine".into();
+        reg.set(b, vec![mine], &path);
+        let names: Vec<_> = load_from(&path).into_iter().map(|w| w.name).collect();
+        assert_eq!(names.len(), 3);
+        assert_eq!(names[2], "mine");
+
+        // A `-e` launch never restores, so the first save still has to
+        // read what is on disk before writing.
+        let mut cold = Pinned::default();
+        let c = cold.register();
+        cold.set(c, Vec::new(), &path);
+        assert_eq!(load_from(&path).len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

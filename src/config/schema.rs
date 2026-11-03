@@ -97,6 +97,9 @@ pub struct WorkspacesConfig {
     /// How long to wait for a shell to show its first prompt before giving
     /// up on that pane's startup command rather than firing it into a void.
     pub startup_timeout: DurationText,
+    /// Pin every new workspace as it is created, so it survives restarts
+    /// without a trip to the panel.
+    pub auto_pin: bool,
 }
 
 impl Default for WorkspacesConfig {
@@ -104,6 +107,7 @@ impl Default for WorkspacesConfig {
         Self {
             run_startup_commands: true,
             startup_timeout: DurationText(std::time::Duration::from_secs(5)),
+            auto_pin: false,
         }
     }
 }

@@ -269,6 +269,8 @@ pub struct OmniPTY {
     dark_appearance: bool,
     /// Another app is frontmost, for `window.inactive_window_opacity`.
     window_active: bool,
+    /// This window's slice of the process-wide pinned set.
+    pinned: crate::workspaces::Owner,
     /// Saved startup commands run on restore. `workspaces.run_startup_commands`
     /// unless this launch opted out (`--no-startup-commands`, or shift held).
     run_startup_commands: bool,
@@ -881,6 +883,7 @@ impl OmniPTY {
             closed_tabs: VecDeque::new(),
             dark_appearance,
             window_active: window.is_window_active(),
+            pinned: crate::workspaces::Owner::new(),
             run_startup_commands: false,
             startup_skipped_at_launch: false,
             opened_at: Instant::now(),
@@ -1573,7 +1576,7 @@ impl OmniPTY {
             let name = default_ws_name(std::iter::empty());
             let fresh = Workspace {
                 name,
-                persist: false,
+                persist: self.config.workspaces.auto_pin,
                 tabs: vec![TabState::new(Node::Leaf(id), id)],
                 active_tab: 0,
             };
@@ -5565,7 +5568,7 @@ impl OmniPTY {
         let name = self.next_ws_name();
         self.workspaces.push(Workspace {
             name,
-            persist: false,
+            persist: self.config.workspaces.auto_pin,
             tabs: vec![TabState::new(Node::Leaf(id), id)],
             active_tab: 0,
         });
@@ -5598,11 +5601,12 @@ impl OmniPTY {
                 tabs: w.tabs.iter().map(|t| self.saved_tab(t, cx)).collect(),
             })
             .collect();
-        crate::workspaces::save(&saved);
+        self.pinned.save(saved);
     }
 
-    /// First-run state: restore persisted workspaces (fresh shells in their
-    /// saved directories) or create the default "workspace 1".
+    /// First-run state: restore the pinned workspaces no other window holds
+    /// (fresh shells in their saved directories) or create the default
+    /// "workspace 1".
     fn bootstrap_workspaces(
         &mut self,
         initial_cwd: PathBuf,
@@ -5613,7 +5617,7 @@ impl OmniPTY {
     ) {
         if restore {
             let run = self.run_startup_commands;
-            let pinned = crate::workspaces::load();
+            let pinned = self.pinned.restore();
             crate::telemetry::breadcrumb(
                 "workspaces",
                 format!("restoring {} pinned", pinned.len()),
@@ -5640,14 +5644,18 @@ impl OmniPTY {
             }
         }
         if self.workspaces.is_empty() {
+            let persist = self.config.workspaces.auto_pin && command.is_none();
             let id = self.create_pane_running(initial_cwd, command, window, cx);
             let name = self.next_ws_name();
             self.workspaces.push(Workspace {
                 name,
-                persist: false,
+                persist,
                 tabs: vec![TabState::new(Node::Leaf(id), id)],
                 active_tab: 0,
             });
+            if persist {
+                self.save_workspaces(cx);
+            }
         }
         self.active_ws = 0;
         self.ws_selected = 0;
@@ -6650,14 +6658,19 @@ fn set_window_blur(window: &Window, on: bool) {
 /// Open an OmniPTY window: shared by startup and the NewWindow action.
 /// `command` is the `-e` program for the first pane, only ever set for the
 /// window a launch opens; windows made from inside the app get a shell.
+///
+/// Every window first takes over the pinned workspaces no open window is
+/// showing: all of them at launch, the ones a closed window left behind
+/// for cmd-n. The `-e` window is the exception — a TUI launched from the
+/// desktop shouldn't drag the saved session up with it.
 pub fn open_omnipty_window(
     config: Config,
     config_error: Option<String>,
     cwd: Option<PathBuf>,
     command: Option<Vec<String>>,
-    restore: bool,
     cx: &mut gpui::App,
 ) {
+    let restore = command.is_none();
     let window_background = window_background(config.window.opacity < 1.0, config.window.blur);
 
     // `window.titlebar` is a macOS setting: on Linux the compositor owns
@@ -6880,7 +6893,7 @@ impl Render for OmniPTY {
             .on_action(cx.listener(|this, _: &NewWindow, _w, cx| {
                 let cwd = this.active_pane().read(cx).cwd.clone();
                 let (config, error) = config::load();
-                open_omnipty_window(config, error, cwd, None, false, cx);
+                open_omnipty_window(config, error, cwd, None, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.new_tab(window, cx);

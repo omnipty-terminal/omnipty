@@ -161,11 +161,9 @@ fn main() {
             std::process::exit(2);
         }
     };
-    // `-e`: the first pane runs this instead of a shell, and pinned
-    // workspaces stay put — a TUI launched from the desktop shouldn't drag
-    // the whole saved session up with it.
+    // `-e`: the first pane runs this instead of a shell (and the window
+    // restores nothing, see `open_omnipty_window`).
     let command = launch.command.clone();
-    let restore = command.is_none();
     cli::install(launch);
 
     // A bundle the old updater wrote OmniPTY into under its former name
@@ -191,7 +189,7 @@ fn main() {
     // nothing further to check — a closed handle can linger in cx.windows().
     app.on_reopen(|cx| {
         let (config, error) = config::load();
-        app::open_omnipty_window(config, error, None, None, true, cx);
+        app::open_omnipty_window(config, error, None, None, cx);
     });
     app.run(move |cx: &mut App| {
         // macOS quits through [NSApp terminate:], which exits without coming
@@ -260,7 +258,7 @@ fn main() {
         cx.on_action(|_: &NewWindow, cx| {
             if cx.windows().is_empty() {
                 let (config, error) = config::load();
-                app::open_omnipty_window(config, error, None, None, false, cx);
+                app::open_omnipty_window(config, error, None, None, cx);
             }
         });
         cx.on_action(|_: &OpenHelp, cx| cx.open_url(&format!("{WEBSITE_URL}/docs/")));
@@ -301,7 +299,7 @@ fn main() {
         })
         .detach();
 
-        app::open_omnipty_window(config, config_error, None, command, restore, cx);
+        app::open_omnipty_window(config, config_error, None, command, cx);
     });
 }
 

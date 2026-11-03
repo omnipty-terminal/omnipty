@@ -11,6 +11,21 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Pin every workspace automatically.** Set `auto_pin = true` under
+  `[workspaces]` and each new workspace is pinned as it's created, so it
+  survives a restart without pressing `p` in the panel.
+
+### Fixed
+
+- **Opening a second window could wipe your pinned workspaces.** Each window
+  kept its own list and wrote it over the shared file, so a window opened
+  with *New Window* (which starts empty) erased what the first one had
+  pinned. The app now keeps one set across all windows and always writes
+  the union. Closing a window leaves its pins in place, and the next window
+  you open picks them up instead of starting from scratch.
+
 ## [0.9.3] - 2026-10-30
 
 ### Added
