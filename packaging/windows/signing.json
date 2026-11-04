@@ -1,0 +1,6 @@
+{
+  "Endpoint": "https://eus.codesigning.azure.net",
+  "CodeSigningAccountName": "OmniPTY-Signing",
+  "CertificateProfileName": "omnipty-public",
+  "CorrelationId": "omnipty-release"
+}
