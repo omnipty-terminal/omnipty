@@ -79,6 +79,10 @@ OmniPTY keeps itself up to date from there.
 installs into `~/.local` with `./install.sh`, and Arch users can build the pacman package in
 [`packaging/aur`](packaging/aur/omnipty-bin).
 
+**Windows** 10 (1903) or later and Windows 11, x64: in a **closed beta**.
+[Request access at beta.omnipty.com](https://beta.omnipty.com); approved testers get a key by
+email that unlocks the signed installer.
+
 Requirements, every install route, and building from source are in the
 [install docs](https://omnipty.com/docs/install/).
 
@@ -104,7 +108,7 @@ while simultaneously catching potential errors instantly as they occur and relea
 | 1 | Rename to OmniPTY | ✅ |
 | 2 | Add Sentry for Error/Crash reporting | ✅ |
 | 3 | Global workspace/tab/pane name search and jump-to | ✅ |
-| 4 | Windows port | ❌ |
+| 4 | Windows port | 🧪 [Closed beta](https://beta.omnipty.com) |
 
 As OmniPTY grows, so will this list. It is also non-inclusive, so there may be smaller feature adds and fixes not listed here.
 
