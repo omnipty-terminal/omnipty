@@ -19,6 +19,11 @@ write for users: what changed and why it matters, not which files moved.
 
 ### Fixed
 
+- **Update installers no longer pile up on disk.** The in-app updater kept
+  every downloaded DMG in `~/.cache/omnipty/updates/` after installing it. On
+  launch, OmniPTY now deletes the DMGs for the version you're running and
+  older ones. A DMG for a newer release, or for an install that didn't take,
+  is kept.
 - **Opening a second window could wipe your pinned workspaces.** Each window
   kept its own list and wrote it over the shared file, so a window opened
   with *New Window* (which starts empty) erased what the first one had

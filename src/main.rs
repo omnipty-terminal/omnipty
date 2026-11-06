@@ -178,7 +178,10 @@ fn main() {
     // after the early returns above, so `--version` never starts it.
     let _sentry = telemetry::init(&config);
     #[cfg(target_os = "macos")]
-    update::check_install_attempt();
+    {
+        update::check_install_attempt();
+        update::prune_updates();
+    }
     // Silent-cd/run handoff files a killed shell never consumed.
     prompt::integration::clean_stale_channels();
 

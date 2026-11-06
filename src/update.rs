@@ -277,6 +277,42 @@ pub fn download(info: &ReleaseInfo) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// Whether a file in the updates cache is a DMG (or an unfinished download)
+/// for `current` or an older version, i.e. one nothing will install again.
+/// Newer ones are kept: `download` reuses a verified copy.
+#[cfg(any(target_os = "macos", test))]
+fn is_stale_update(name: &str, current: &str) -> bool {
+    let version = name
+        .strip_prefix("OmniPTY-")
+        .and_then(|n| n.strip_suffix(".dmg.partial").or_else(|| n.strip_suffix(".dmg")));
+    version.is_some_and(|v| parse_version(v).is_some() && !is_newer(v, current))
+}
+
+/// Delete downloaded update DMGs the running version has already caught up
+/// with. A failed install leaves the version unchanged, so its DMG stays
+/// for the retry.
+#[cfg(any(target_os = "macos", test))]
+fn prune_updates_in(dir: &Path, current: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|n| is_stale_update(n, current)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// At launch: clear out the DMGs of updates that have been installed.
+#[cfg(target_os = "macos")]
+pub fn prune_updates() {
+    prune_updates_in(
+        &crate::paths::cache_dir().join("updates"),
+        env!("CARGO_PKG_VERSION"),
+    );
+}
+
 /// Called just before quitting into the installer script. The install runs
 /// in a detached shell after OmniPTY quits, so its failures are invisible:
 /// this leaves a marker for `check_install_attempt` at the next launch.
@@ -401,6 +437,35 @@ pub fn relocate_renamed_bundle() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_removes_only_dmgs_the_app_has_caught_up_with() {
+        let dir = std::env::temp_dir().join(format!("omnipty-prune-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = [
+            "OmniPTY-0.9.2.dmg",
+            "OmniPTY-0.9.3.dmg",
+            "OmniPTY-0.9.3.dmg.partial",
+            "OmniPTY-0.9.4.dmg",
+            "OmniPTY-0.9.4.dmg.partial",
+            "notes.txt",
+        ];
+        for n in names {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        prune_updates_in(&dir, "0.9.3");
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["OmniPTY-0.9.4.dmg", "OmniPTY-0.9.4.dmg.partial", "notes.txt"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn updated_from_only_reports_upgrades() {
