@@ -11,6 +11,8 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-06
+
 ### Added
 
 - **Pin every workspace automatically.** Set `auto_pin = true` under
