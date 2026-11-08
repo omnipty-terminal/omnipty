@@ -13,6 +13,7 @@
   <a href="#about">About</a> ·
   <a href="#download">Download</a> ·
   <a href="https://omnipty.com/docs/">Documentation</a> ·
+  <a href="https://blog.omnipty.com">Blog</a> ·
   <a href="#contributing">Contributing</a> ·
   <a href="https://discord.gg/APV9FYGgeh">Discord</a>
 </p>
