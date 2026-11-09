@@ -268,6 +268,8 @@ run_startup_commands = true   # re-run each pane's saved startup command when a 
                               # or hold shift while OmniPTY launches)
 startup_timeout      = "5s"   # give up on a pane's command if its shell isn't ready by then
 auto_pin             = false  # pin every new workspace as it's created, so it survives restarts
+persist_sessions     = true   # keep shells running in a background session server when OmniPTY
+                              # quits; pinned workspaces reattach to them on the next launch
 
 # [crash_reports]             # OmniPTY asks once, on first launch; set this to change your answer
 # enabled = false             # when OmniPTY crashes, send the developer the stack trace,

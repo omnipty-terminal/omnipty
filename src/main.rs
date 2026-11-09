@@ -12,6 +12,7 @@ mod palette;
 mod panes;
 mod paths;
 mod prompt;
+mod server;
 mod startup;
 mod telemetry;
 mod terminal;
@@ -50,6 +51,7 @@ pub(crate) fn menus() -> Vec<Menu> {
     omnipty.extend([
         MenuItem::separator(),
         MenuItem::action("Quit OmniPTY", Quit),
+        MenuItem::action("Quit and End Sessions", QuitAndEndSessions),
     ]);
     vec![
         Menu {
@@ -155,6 +157,20 @@ fn main() {
             println!("{}", cli::USAGE);
             return;
         }
+        // The session server: no window, no config, no crash reporting of
+        // its own. Exits by itself once it has nothing left to serve.
+        Ok(cli::Parsed::Server) => {
+            let result = server::run(
+                &terminal::remote::endpoint(),
+                &terminal::remote::lock_path(),
+                || std::process::exit(0),
+            );
+            if let Err(e) = result {
+                eprintln!("omnipty --server: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Ok(cli::Parsed::Run(launch)) => launch,
         Err(message) => {
             eprintln!("omnipty: {message}\n{}", cli::USAGE);
@@ -249,7 +265,15 @@ fn main() {
         cx.bind_keys(keymap::resolve(&config.keymap).bindings());
 
         // App-level actions (no window required).
+        // Plain quit leaves pinned workspaces' shells running in the session
+        // server; this one ends every shell first.
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &QuitAndEndSessions, cx| {
+            if let Err(e) = terminal::remote::shutdown() {
+                eprintln!("omnipty: ending sessions: {e}");
+            }
+            cx.quit();
+        });
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         // Windows show the About panel; this is the no-window fallback,

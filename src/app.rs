@@ -157,8 +157,8 @@ impl Render for TabDragLabel {
 const CLOSED_TAB_RING: usize = 10;
 
 /// A named collection of tabs — the tmux-session analogue. Temporary by
-/// default; `persist` opts it into surviving restarts (layout + directories,
-/// fresh shells).
+/// default; `persist` opts it into surviving restarts (layout, directories,
+/// and — through the session server — the shells themselves).
 struct Workspace {
     name: String,
     persist: bool,
@@ -274,6 +274,12 @@ pub struct OmniPTY {
     /// Saved startup commands run on restore. `workspaces.run_startup_commands`
     /// unless this launch opted out (`--no-startup-commands`, or shift held).
     run_startup_commands: bool,
+    /// New panes' shells run in the session server, so pinned workspaces
+    /// keep them across a quit (`workspaces.persist_sessions`). Fixed per
+    /// window; a `-e` window never takes part.
+    remote: bool,
+    /// Panes that took over a still-running shell at bootstrap, for the toast.
+    reattached: usize,
     startup_skipped_at_launch: bool,
     /// When the window opened. Wayland (and X11) only report modifier
     /// state through events, which start once the window has keyboard
@@ -885,6 +891,8 @@ impl OmniPTY {
             window_active: window.is_window_active(),
             pinned: crate::workspaces::Owner::new(),
             run_startup_commands: false,
+            remote: false,
+            reattached: 0,
             startup_skipped_at_launch: false,
             opened_at: Instant::now(),
             _config_watcher: config_watcher,
@@ -897,6 +905,7 @@ impl OmniPTY {
             crate::cli::cli().no_startup_commands || window.modifiers().shift;
         this.run_startup_commands =
             this.config.workspaces.run_startup_commands && !this.startup_skipped_at_launch;
+        this.remote = this.config.workspaces.persist_sessions && restore;
         this.bootstrap_workspaces(cwd, command, restore, window, cx);
         if let Some(message) = config_error {
             this.sticky_toast(message);
@@ -1154,10 +1163,35 @@ impl OmniPTY {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneId {
+        self.spawn_pane(cwd, command, None, window, cx)
+    }
+
+    /// Every pane starts here. `attach` names a session-server shell to take
+    /// over first (a restored pane's); if it is gone, a fresh one starts.
+    fn spawn_pane(
+        &mut self,
+        cwd: PathBuf,
+        command: Option<Vec<String>>,
+        attach: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneId {
         let id = self.next_pane_id;
         self.next_pane_id += 1;
         let (config, theme) = (self.config.clone(), self.theme.clone());
-        let pane = cx.new(|cx| TerminalPane::new(config, theme, cwd, command, cx));
+        let launch = crate::terminal::PaneSession {
+            remote: self.remote,
+            // A restored pane is a pinned workspace's by definition; any
+            // other starts with the active workspace's pin state, and the
+            // next save corrects it if the pane lands elsewhere.
+            persist: attach.is_some()
+                || self
+                    .workspaces
+                    .get(self.active_ws)
+                    .is_some_and(|w| w.persist),
+            attach,
+        };
+        let pane = cx.new(|cx| TerminalPane::new(config, theme, cwd, command, launch, cx));
         let tree_root = self.tree.read(cx).root.clone();
         pane.update(cx, |t, _| t.tree_root = Some(tree_root));
         let subscription = cx.subscribe_in(&pane, window, Self::on_terminal_event);
@@ -1166,8 +1200,14 @@ impl OmniPTY {
         id
     }
 
-    fn drop_pane(&mut self, id: PaneId) {
-        self.panes.remove(&id);
+    /// The one way a pane leaves on the user's say-so (close pane, tab,
+    /// workspace). Its shell ends here too: a server-run shell in a pinned
+    /// workspace would otherwise live on, detached. Quitting the app never
+    /// comes through here — that is a detach, and the server decides.
+    fn drop_pane(&mut self, id: PaneId, cx: &Context<Self>) {
+        if let Some(pane) = self.panes.remove(&id) {
+            pane.read(cx).kill();
+        }
         self.pane_subscriptions.remove(&id);
     }
 
@@ -1430,7 +1470,7 @@ impl OmniPTY {
         }
         for id in others {
             self.tab_mut().layout.remove(&id);
-            self.drop_pane(id);
+            self.drop_pane(id, cx);
         }
         let tab = self.tab_mut();
         tab.zoomed = None;
@@ -1486,7 +1526,7 @@ impl OmniPTY {
             if tab.zoomed == Some(id) || tab.layout.len() < 2 {
                 tab.zoomed = None;
             }
-            self.drop_pane(id);
+            self.drop_pane(id, cx);
             self.sync_tab_broadcast(wix, tix, cx);
             if wix == self.active_ws && tix == self.ws().active_tab {
                 let next = self.active_id();
@@ -1538,7 +1578,7 @@ impl OmniPTY {
         let tab = self.workspaces[wix].tabs.remove(tix);
         self.remember_closed_tab(&tab, cx);
         for pid in tab.layout.leaves() {
-            self.drop_pane(pid);
+            self.drop_pane(pid, cx);
         }
         let ws = &mut self.workspaces[wix];
         if ws.active_tab >= ws.tabs.len() {
@@ -1585,7 +1625,7 @@ impl OmniPTY {
                 self.remember_closed_tab(tab, cx);
             }
             for pid in old.tabs.iter().flat_map(|t| t.layout.leaves()) {
-                self.drop_pane(pid);
+                self.drop_pane(pid, cx);
             }
             self.active_ws = 0;
             self.ws_selected = 0;
@@ -1596,7 +1636,7 @@ impl OmniPTY {
                 self.remember_closed_tab(tab, cx);
             }
             for pid in old.tabs.iter().flat_map(|t| t.layout.leaves()) {
-                self.drop_pane(pid);
+                self.drop_pane(pid, cx);
             }
             if self.active_ws >= self.workspaces.len() {
                 self.active_ws = self.workspaces.len() - 1;
@@ -2559,6 +2599,9 @@ impl OmniPTY {
                 // restore to, focused or not.
                 self.save_workspaces(cx);
             }
+            // A restarted pane has a new shell behind it; the saved session
+            // id must follow, or a restore would look for the old one.
+            TerminalEvent::SessionChanged => self.save_workspaces(cx),
         }
     }
 
@@ -5274,10 +5317,15 @@ impl OmniPTY {
             .or_else(home_dir)
             .unwrap_or_else(|| PathBuf::from("/"));
         let startup = pane.and_then(|p| p.startup.clone());
+        let session = pane
+            .and_then(|p| p.session.as_ref())
+            .and_then(|s| s.remote_id())
+            .map(str::to_string);
         SavedPane {
             cwd,
             command: startup.as_ref().map(|s| s.command.clone()),
             on_exit: startup.map(|s| s.on_exit).unwrap_or_default(),
+            session,
         }
     }
 
@@ -5290,12 +5338,17 @@ impl OmniPTY {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneId {
-        let id = self.create_pane(saved.cwd.clone(), window, cx);
+        let id = self.spawn_pane(saved.cwd.clone(), None, saved.session.clone(), window, cx);
+        // Took over the shell that was running here: nothing to start.
+        let attached = self.panes[&id].read(cx).attached;
+        if attached {
+            self.reattached += 1;
+        }
         if let Some(startup) = saved.startup() {
             let timeout = self.config.workspaces.startup_timeout.0;
             self.panes[&id].update(cx, |pane, cx| {
                 pane.set_startup(Some(startup), cx);
-                if run {
+                if run && !attached {
                     pane.arm_startup(timeout, cx);
                 }
             });
@@ -5582,10 +5635,15 @@ impl OmniPTY {
         if ix >= self.workspaces.len() {
             return;
         }
+        let moved = self.active_ws != ix;
         self.active_ws = ix;
         self.ws_selected = ix;
         let id = self.active_id();
         self.focus_pane(id, window, cx);
+        // Which workspace is in front is saved, so a relaunch opens on it.
+        if moved {
+            self.save_workspaces(cx);
+        }
     }
 
     /// Serialize every persist-flagged workspace: the split trees with pane
@@ -5594,14 +5652,35 @@ impl OmniPTY {
         let saved: Vec<SavedWorkspace> = self
             .workspaces
             .iter()
-            .filter(|w| w.persist)
-            .map(|w| SavedWorkspace {
+            .enumerate()
+            .filter(|(_, w)| w.persist)
+            .map(|(ix, w)| SavedWorkspace {
                 name: w.name.clone(),
+                active: ix == self.active_ws,
                 active_tab: w.active_tab,
                 tabs: w.tabs.iter().map(|t| self.saved_tab(t, cx)).collect(),
             })
             .collect();
         self.pinned.save(saved);
+        // The server keeps each shell's fate (hold on quit, or hang up) as a
+        // flag; it follows the workspace's pin, so tell it when that moves.
+        // Only on a change: this runs on every cd.
+        for w in &self.workspaces {
+            for tab in &w.tabs {
+                for id in tab.layout.leaves() {
+                    let Some(pane) = self.panes.get(&id) else {
+                        continue;
+                    };
+                    let pane = pane.read(cx);
+                    if pane.persist.get() != w.persist {
+                        pane.persist.set(w.persist);
+                        if let Some(sid) = pane.session.as_ref().and_then(|s| s.remote_id()) {
+                            let _ = crate::terminal::remote::persist(sid, w.persist);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// First-run state: restore the pinned workspaces no other window holds
@@ -5635,12 +5714,44 @@ impl OmniPTY {
                     tabs.push(tab);
                 }
                 let active_tab = saved.active_tab.min(tabs.len() - 1);
+                if saved.active {
+                    self.active_ws = self.workspaces.len();
+                }
                 self.workspaces.push(Workspace {
                     name: saved.name,
                     persist: true,
                     tabs,
                     active_tab,
                 });
+            }
+            if self.reattached > 0 {
+                let n = self.reattached;
+                self.toast(
+                    ToastKind::Info,
+                    format!(
+                        "reattached {n} running shell{}",
+                        if n == 1 { "" } else { "s" }
+                    ),
+                    cx,
+                );
+            }
+            // A saved shell that could not be reattached was replaced by a
+            // fresh one with a new id: write that down now, or the next
+            // launch repeats the miss and the server keeps both generations.
+            if !self.workspaces.is_empty() {
+                self.save_workspaces(cx);
+            }
+            // Shells no saved workspace refers to any more (a crash before
+            // the save above, an edited or deleted file) would otherwise run
+            // in the server forever. With the server not in use, end them
+            // all: the user turned the feature off.
+            let keep = if self.remote {
+                crate::workspaces::saved_sessions()
+            } else {
+                Vec::new()
+            };
+            if let Err(e) = crate::terminal::remote::prune(keep) {
+                crate::telemetry::breadcrumb("workspaces", format!("prune failed: {e}"));
             }
         }
         if self.workspaces.is_empty() {
@@ -5657,8 +5768,8 @@ impl OmniPTY {
                 self.save_workspaces(cx);
             }
         }
-        self.active_ws = 0;
-        self.ws_selected = 0;
+        // Set by the restore above to the workspace that was in front.
+        self.ws_selected = self.active_ws;
         let id = self.active_id();
         self.focus_pane(id, window, cx);
     }

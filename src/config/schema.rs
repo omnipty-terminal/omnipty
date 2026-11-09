@@ -100,6 +100,12 @@ pub struct WorkspacesConfig {
     /// Pin every new workspace as it is created, so it survives restarts
     /// without a trip to the panel.
     pub auto_pin: bool,
+    /// Run every shell under a background session server that outlives the
+    /// app, so a pinned workspace's shells keep running across a quit (or a
+    /// crash) and are reattached, output and all, on the next launch. Off:
+    /// shells run in-process and a restore starts fresh ones. Applies to
+    /// new windows.
+    pub persist_sessions: bool,
 }
 
 impl Default for WorkspacesConfig {
@@ -108,6 +114,7 @@ impl Default for WorkspacesConfig {
             run_startup_commands: true,
             startup_timeout: DurationText(std::time::Duration::from_secs(5)),
             auto_pin: false,
+            persist_sessions: true,
         }
     }
 }

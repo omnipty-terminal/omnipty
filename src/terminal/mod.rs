@@ -9,6 +9,7 @@ pub mod keys;
 pub mod osc;
 pub mod placeholder;
 pub mod process;
+pub mod remote;
 pub mod scan;
 pub mod session;
 pub mod sixel;
@@ -145,6 +146,9 @@ pub enum TerminalEvent {
     /// The shell exited, with its status. The owning window decides whether
     /// to close the pane.
     Exited(Option<i32>),
+    /// The pane runs a different shell now (a restart), so what a pinned
+    /// workspace saves for it has changed.
+    SessionChanged,
     TitleChanged,
     CwdChanged(PathBuf),
     /// Output arrived (coalesced with the repaint tick) — for the "unread"
@@ -383,6 +387,27 @@ pub struct TerminalPane {
     /// in place of the shell, with none of the shell integration, and a
     /// restart re-runs it.
     command: Option<Vec<String>>,
+    /// The shell runs in the session server rather than this process, so it
+    /// can outlive the window. Fixed for the pane's life.
+    pub remote: bool,
+    /// Whether the server keeps the shell when this pane's window goes away:
+    /// the pin state of the workspace it is in. A `Cell` because it is kept
+    /// in step from `save_workspaces`, which has only a shared borrow.
+    pub persist: std::cell::Cell<bool>,
+    /// A session-server id to take over before starting anything new.
+    attach: Option<String>,
+    /// The first session was a reattach: the shell was already running, so
+    /// no startup command should fire.
+    pub attached: bool,
+}
+
+/// How a new pane gets its shell: in-process (the default), or in the
+/// session server, possibly one it already runs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PaneSession {
+    pub remote: bool,
+    pub persist: bool,
+    pub attach: Option<String>,
 }
 
 type PreviewRender = Box<dyn Fn(usize) -> Option<Vec<String>>>;
@@ -463,6 +488,7 @@ impl TerminalPane {
         theme: Rc<Theme>,
         working_dir: PathBuf,
         command: Option<Vec<String>>,
+        launch: PaneSession,
         cx: &mut Context<Self>,
     ) -> Self {
         let log = CommandLog::new(config.commands.max_entries.max(1));
@@ -528,8 +554,12 @@ impl TerminalPane {
             startup_label_pending: false,
             restart_gate: RestartGate::default(),
             command,
+            remote: launch.remote,
+            persist: std::cell::Cell::new(launch.persist),
+            attach: launch.attach,
+            attached: false,
         };
-        this.spawn_session(cx);
+        this.start_session(cx);
         this.refresh_git_root(cx);
         this.spawn_blink_task(cx);
         // A closed pane's images would otherwise stay in the GPU atlas.
@@ -637,49 +667,29 @@ impl TerminalPane {
             .and_then(|n| n.to_str())
             .unwrap_or("?")
             .to_owned();
-        match TerminalSession::spawn(options, self.size) {
-            Ok((session, mut rx)) => {
+        let spawned = if self.remote {
+            match TerminalSession::spawn_remote(options.clone(), self.size, self.persist.get()) {
+                Ok(spawned) => Ok(spawned),
+                Err(e) => {
+                    // Never cost the user a shell: run it here, as before there
+                    // was a server. This one won't survive a quit.
+                    crate::telemetry::breadcrumb(
+                        "session",
+                        format!("server unavailable, spawning locally: {e}"),
+                    );
+                    TerminalSession::spawn(options, self.size)
+                }
+            }
+        } else {
+            TerminalSession::spawn(options, self.size)
+        };
+        match spawned {
+            Ok((session, rx)) => {
                 if self.command.is_none() {
                     // Shell-integration bugs tend to belong to one shell.
                     crate::telemetry::tag("shell", &shell_name);
                 }
-                session.set_term_options(self.term_config());
-                self.session = Some(session);
-                self.child_exited = None;
-                self.vi = None;
-                self.foreground = None;
-                cx.spawn(async move |this, cx| {
-                    while let Some(event) = rx.next().await {
-                        let mut batch = vec![event];
-                        while batch.len() < 1024 {
-                            match rx.try_recv() {
-                                Ok(ev) => batch.push(ev),
-                                Err(_) => break,
-                            }
-                        }
-                        let alive = this
-                            .update(cx, |pane, cx| {
-                                for event in batch {
-                                    match event {
-                                        SessionEvent::Term(event) => {
-                                            pane.handle_alac_event(event, cx)
-                                        }
-                                        SessionEvent::Marker(marker) => {
-                                            pane.handle_marker(marker, cx)
-                                        }
-                                        SessionEvent::Graphics(event) => {
-                                            pane.handle_graphics(event, cx)
-                                        }
-                                    }
-                                }
-                            })
-                            .is_ok();
-                        if !alive {
-                            break;
-                        }
-                    }
-                })
-                .detach();
+                self.adopt_session(session, rx, cx);
             }
             Err(e) => {
                 // NotFound is a `shell.program` typo, and the pane title already
@@ -696,13 +706,94 @@ impl TerminalPane {
         }
     }
 
+    /// The pane's first shell: the one the session server still has for it
+    /// (a pinned workspace's, from before the last quit), else a new one.
+    fn start_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.attach.take()
+            && self.remote
+        {
+            match TerminalSession::attach(
+                &id,
+                self.config.shell.scrollback,
+                self.config.images.enabled,
+                self.size,
+            ) {
+                Ok((session, rx)) => {
+                    self.attached = true;
+                    self.adopt_session(session, rx, cx);
+                    return;
+                }
+                Err(e) => crate::telemetry::breadcrumb(
+                    "session",
+                    format!("{id}: not reattached ({e}), starting a fresh shell"),
+                ),
+            }
+        }
+        self.spawn_session(cx);
+    }
+
+    /// Take a freshly started (or reattached) session as this pane's, and
+    /// pump its events onto the main thread.
+    fn adopt_session(
+        &mut self,
+        session: TerminalSession,
+        mut rx: futures::channel::mpsc::UnboundedReceiver<SessionEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        session.set_term_options(self.term_config());
+        self.session = Some(session);
+        self.child_exited = None;
+        self.vi = None;
+        self.foreground = None;
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = rx.next().await {
+                let mut batch = vec![event];
+                while batch.len() < 1024 {
+                    match rx.try_recv() {
+                        Ok(ev) => batch.push(ev),
+                        Err(_) => break,
+                    }
+                }
+                let alive = this
+                    .update(cx, |pane, cx| {
+                        for event in batch {
+                            match event {
+                                SessionEvent::Term(event) => pane.handle_alac_event(event, cx),
+                                SessionEvent::Marker(marker) => pane.handle_marker(marker, cx),
+                                SessionEvent::Graphics(event) => pane.handle_graphics(event, cx),
+                            }
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn restart(&mut self, cx: &mut Context<Self>) {
+        // A remote shell is only detached when its session drops; a pane the
+        // user restarts means the old one is done with (it has usually
+        // exited already, in which case this is a no-op on the server).
+        self.kill();
         self.session = None;
         // The new shell starts from an empty grid; so does the store.
         let stale = self.images.clear();
         self.release_images(stale, cx);
         self.spawn_session(cx);
+        cx.emit(TerminalEvent::SessionChanged);
         cx.notify();
+    }
+
+    /// End the shell for good, wherever it runs. Dropping the session only
+    /// detaches a server-run shell, which a pinned pane's would then outlive
+    /// the pane; closing a pane says so explicitly.
+    pub fn kill(&self) {
+        if let Some(session) = &self.session {
+            session.kill();
+        }
     }
 
     /// An image arrived, was placed, or was deleted. Always ahead of the

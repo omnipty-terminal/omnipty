@@ -18,6 +18,7 @@ const REVEAL_TITLE: &str = if cfg!(target_os = "macos") {
 omnipty_actions! {
     // --- Application ---
     Quit            => "app::quit",              "Quit OmniPTY",              "Application", ["exit"], Root;
+    QuitAndEndSessions => "app::quit_end_sessions", "Quit and End Sessions",   "Application", ["exit", "kill server", "stop shells"], Root;
     About           => "app::about",             "About OmniPTY",             "Application", [], Root;
     OpenSettings    => "app::settings",          "Open Settings",           "Application", ["config", "preferences"], Root;
     SelectTheme     => "app::select_theme",      "Select Theme",            "Application", ["colors", "preset"], Root;

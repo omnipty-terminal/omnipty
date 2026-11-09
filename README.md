@@ -51,8 +51,9 @@ see [upgrading from Oxide](https://omnipty.com/docs/install/#from-oxide) for Hom
 - **A file tree that follows you.** A vim-driven drawer beside your panes that re-roots
   when your shell `cd`s. `y` drops the selected path at the prompt, and `cmd-click` on a
   `path:line` in output opens your editor at that line.
-- **Workspaces instead of tmux sessions.** Named sets of tabs and splits. Pin one and it
-  reopens with the same layout, directories, and startup commands.
+- **Workspaces instead of tmux sessions.** Named sets of tabs and splits. Pin one and its
+  shells keep running when you quit, tmux-style; it reopens with the same layout,
+  scrollback, and running programs.
 - **tmux reflexes, no tmux.** `ctrl-w` splits, zoom, broadcast input, and a vim copy mode
   over the scrollback.
 - **It knows what your commands did.** Run time in the status bar, a red flash when a

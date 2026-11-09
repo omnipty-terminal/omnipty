@@ -11,6 +11,26 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Pinned workspaces keep their shells running.** Quit OmniPTY and the
+  shells in your pinned workspaces carry on in the background, the way tmux's
+  server keeps them; the next launch picks them up where they were, scrollback
+  and all, with whatever was running still running. A crash leaves them
+  running too. Unpinned workspaces still end with the window. **Quit and End
+  Sessions**, in the app menu and the command palette, stops everything on
+  the way out. A shell that didn't survive — after a reboot, say — starts
+  fresh in its directory and runs its startup command as before. To go back
+  to fresh shells on every launch, set `persist_sessions = false` under
+  `[workspaces]`.
+
+### Changed
+
+- **OmniPTY reopens on the workspace you left.** The pinned workspace that
+  was in front when you quit is selected again on the next launch, instead of
+  always the first in the list.
+
+
 ## [0.9.4] - 2026-11-06
 
 ### Added

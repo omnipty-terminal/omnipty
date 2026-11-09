@@ -38,6 +38,9 @@ pub enum Parsed {
     Run(Cli),
     Version,
     Help,
+    /// `--server`: run the session server instead of the app. Internal —
+    /// the app starts it itself (`terminal::remote::connect_or_start`).
+    Server,
 }
 
 /// Parse the arguments after the program name. Everything after `-e` is
@@ -53,6 +56,7 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
+            "--server" => return Ok(Parsed::Server),
             "--no-startup-commands" => cli.no_startup_commands = true,
             "-e" => {
                 let command: Vec<String> = args.collect();
