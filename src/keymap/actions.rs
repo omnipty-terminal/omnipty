@@ -34,6 +34,7 @@ omnipty_actions! {
     InstallUpdate   => "app::install_update",    "Install Downloaded Update", "Application", [], Root;
     ToggleStatusBar => "app::toggle_status_bar", "Toggle Status Bar",       "Application", [], Root;
     ToggleTabBar    => "app::toggle_tab_bar",    "Toggle Tab Bar",          "Application", ["hide tabs", "show tabs"], Root;
+    InstallCli      => "app::install_cli",       "Install omnipty CLI",     "Application", ["command line", "shell command", "path"], Root;
     ShowAppMenu     => "app::menu",              "Show App Menu",           "Application", ["hamburger", "menu bar"], Root;
 
     // --- Window ---

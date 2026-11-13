@@ -13,11 +13,18 @@ write for users: what changed and why it matters, not which files moved.
 
 ### Added
 
+- **Install the `omnipty` command from the app on macOS.** OmniPTY →
+  Install omnipty CLI puts it on your `PATH` (it asks for your password), so
+  `omnipty ~/Code` opens a window there from any terminal, whether or not
+  OmniPTY is already running. No more copying a script out of a clone of the
+  repo. Dropping a folder on the Dock icon opens a window there too.
 - **Pinned workspaces keep their shells running.** Quit OmniPTY and the
   shells in your pinned workspaces carry on in the background, the way tmux's
   server keeps them; the next launch picks them up where they were, scrollback
   and all, with whatever was running still running. A crash leaves them
-  running too. Unpinned workspaces still end with the window. **Quit and End
+  running too. Pinning a workspace says so, so a dev server that's still
+  holding its port after you quit isn't a mystery. Unpinned workspaces still
+  end with the window. **Quit and End
   Sessions**, in the app menu and the command palette, stops everything on
   the way out. A shell that didn't survive — after a reboot, say — starts
   fresh in its directory and runs its startup command as before. To go back

@@ -2,7 +2,7 @@
 # CLI shim: `omnipty [dir] [--no-startup-commands]` opens OmniPTY from another
 # terminal.
 #
-# macOS install: cp scripts/omnipty-cli /usr/local/bin/omnipty && chmod +x /usr/local/bin/omnipty
+# macOS install: OmniPTY → Install omnipty CLI (the app embeds this file).
 #
 # Linux doesn't need it: the binary itself is `omnipty` on PATH and takes the
 # same arguments. Install this ahead of it (say, in ~/.local/bin) only if
@@ -13,20 +13,53 @@
 # through untouched: --no-startup-commands restores pinned workspaces
 # without running their startup commands, --app-id <id> names the window,
 # and everything after -e is the command to run instead of the shell.
+# The running app's bundle (macOS), skipping the session server. Targeting
+# it by path matters when more than one copy is on disk (say a dev build
+# beside /Applications): `open -a OmniPTY` picks one by name, maybe not this.
+running_app() {
+  local pid exe
+  for pid in $(pgrep -x omnipty); do
+    [[ "$(ps -o args= -p "$pid")" == *" --server" ]] && continue
+    exe="$(ps -o comm= -p "$pid")"
+    if [[ "$exe" == */OmniPTY.app/Contents/MacOS/omnipty ]]; then
+      echo "${exe%/Contents/MacOS/omnipty}"
+      return
+    fi
+  done
+}
+
 dir=""
 flags=()
 while (($#)); do
   case "$1" in
     -e) flags+=("$@"); break ;;
     --app-id) flags+=("$1" "$2"); shift 2 ;;
+    -h|--help|-V|--version) info="$1"; shift ;;
     --*) flags+=("$1"); shift ;;
     *) dir="$1"; shift ;;
   esac
 done
 
+# Absolute: a macOS app launched through `open` starts in /, not here.
+dir="$(cd "${dir:-.}" && pwd)" || exit 1
+
 case "$(uname -s)" in
   Darwin)
-    open -a OmniPTY --args "${dir:-$PWD}" "${flags[@]}"
+    app="$(running_app)"
+    # --help/--version print and exit, so run the binary right here.
+    if [[ -n "${info:-}" ]]; then
+      exec "${app:-/Applications/OmniPTY.app}/Contents/MacOS/omnipty" "$info"
+    fi
+    # `--args` only reaches a fresh launch; a running app takes the directory
+    # as a document instead, and has no way to receive flags.
+    if [[ -n "$app" ]]; then
+      if ((${#flags[@]})); then
+        echo "omnipty: already running, so ${flags[*]} only applies at launch; opening a window at $dir" >&2
+      fi
+      open -a "$app" "$dir"
+    else
+      open -a OmniPTY --args "$dir" "${flags[@]}"
+    fi
     ;;
   *)
     # The real binary: OMNIPTY_BIN, or the first `omnipty` on PATH that isn't
@@ -48,10 +81,11 @@ case "$(uname -s)" in
       echo "omnipty: can't find the omnipty binary on PATH (set OMNIPTY_BIN)" >&2
       exit 1
     fi
+    [[ -n "${info:-}" ]] && exec "$bin" "$info"
     if command -v setsid >/dev/null 2>&1; then
-      setsid -f "$bin" "${dir:-$PWD}" "${flags[@]}" >/dev/null 2>&1 </dev/null
+      setsid -f "$bin" "$dir" "${flags[@]}" >/dev/null 2>&1 </dev/null
     else
-      nohup "$bin" "${dir:-$PWD}" "${flags[@]}" >/dev/null 2>&1 </dev/null &
+      nohup "$bin" "$dir" "${flags[@]}" >/dev/null 2>&1 </dev/null &
     fi
     ;;
 esac

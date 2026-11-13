@@ -2058,6 +2058,26 @@ impl OmniPTY {
         }
     }
 
+    /// Pin or unpin workspace `ix`. Quitting detaches silently, so pinning is
+    /// where the user hears that these shells will outlive the window.
+    fn toggle_pin(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(ws) = self.workspaces.get_mut(ix) else {
+            return;
+        };
+        ws.persist = !ws.persist;
+        let pinned = ws.persist;
+        self.save_workspaces(cx);
+        if pinned && self.remote {
+            self.toast(
+                ToastKind::Info,
+                "pinned: its shells keep running after you quit (Quit and End Sessions stops them)"
+                    .into(),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     /// A notice that times out on its own: 4s for info, 8s for errors.
     fn toast(&mut self, kind: ToastKind, message: String, cx: &mut Context<Self>) {
         let id = self.push_toast(kind, message, false, false);
@@ -5958,11 +5978,7 @@ impl OmniPTY {
                 this.open_ws_rename(ix, window, cx);
             }))
             .on_action(cx.listener(|this, _: &WsTogglePersist, _w, cx| {
-                if let Some(ws) = this.workspaces.get_mut(this.ws_selected) {
-                    ws.persist = !ws.persist;
-                    this.save_workspaces(cx);
-                    cx.notify();
-                }
+                this.toggle_pin(this.ws_selected, cx);
             }))
             .on_action(cx.listener(|this, _: &WsEditStartup, window, cx| {
                 let ix = this.ws_selected;
@@ -6110,11 +6126,7 @@ impl OmniPTY {
                             gpui::MouseButton::Left,
                             cx.listener(move |this, _: &gpui::MouseDownEvent, _w, cx| {
                                 this.ws_context_menu = None;
-                                if let Some(ws) = this.workspaces.get_mut(ix) {
-                                    ws.persist = !ws.persist;
-                                    this.save_workspaces(cx);
-                                }
-                                cx.notify();
+                                this.toggle_pin(ix, cx);
                             }),
                         ),
                     )
@@ -6699,6 +6711,45 @@ fn persist_preset(name: &str, variant: Option<&str>) -> Result<(), String> {
 /// Write the answer to the crash-reports question into config.toml, keeping
 /// the rest of the file as it is. The live reload then sees it: off stops a
 /// running copy at once, on waits for the next launch (see telemetry::init).
+/// Copy the `scripts/omnipty-cli` shim to `/usr/local/bin/omnipty`, behind
+/// the macOS admin password prompt. `Ok(None)`: the user cancelled it.
+#[cfg(target_os = "macos")]
+fn install_cli() -> Result<Option<&'static str>, String> {
+    let shim = std::env::temp_dir().join("omnipty-cli");
+    std::fs::write(&shim, include_str!("../scripts/omnipty-cli"))
+        .map_err(|e| format!("couldn't install the omnipty command: {e}"))?;
+    // The path goes in as argv so it never needs AppleScript quoting.
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "do shell script \"mkdir -p /usr/local/bin && install -m 755 \" & quoted form of \
+             item 1 of argv & \" /usr/local/bin/omnipty\" with administrator privileges",
+            "-e",
+            "end run",
+        ])
+        .arg(&shim)
+        .output();
+    let _ = std::fs::remove_file(&shim);
+    let out = out.map_err(|e| format!("couldn't install the omnipty command: {e}"))?;
+    if out.status.success() {
+        return Ok(Some(
+            "installed /usr/local/bin/omnipty — run `omnipty` from any terminal",
+        ));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("-128") {
+        return Ok(None); // "User canceled."
+    }
+    Err(format!("couldn't install the omnipty command: {}", err.trim()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_cli() -> Result<Option<&'static str>, String> {
+    Ok(Some("the omnipty command is already on your PATH"))
+}
+
 fn persist_crash_reports(enabled: bool) -> Result<(), String> {
     let path = config::config_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -7199,6 +7250,20 @@ impl Render for OmniPTY {
             }))
             .on_action(cx.listener(|this, _: &InstallUpdate, _w, cx| {
                 this.install_update(cx);
+            }))
+            .on_action(cx.listener(|_, _: &InstallCli, _w, cx| {
+                // Blocks on the password dialog, so off the main thread.
+                let task = cx.background_executor().spawn(async { install_cli() });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    this.update(cx, |this, cx| match result {
+                        Ok(Some(msg)) => this.toast(ToastKind::Info, msg.into(), cx),
+                        Ok(None) => {}
+                        Err(e) => this.toast(ToastKind::Error, e, cx),
+                    })
+                    .ok();
+                })
+                .detach();
             }))
             .on_action(cx.listener(|this, _: &ShowAppMenu, _w, cx| {
                 this.toggle_app_menu(cx);

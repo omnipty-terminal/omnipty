@@ -491,11 +491,11 @@ impl Pane {
                         }
                     }
                     STREAM_TOKEN => {
-                        if event.readable || event.is_interrupt() {
-                            if let Err(e) = self.stream_read(&mut buf) {
-                                self.detach(Some(e));
-                                continue;
-                            }
+                        if (event.readable || event.is_interrupt())
+                            && let Err(e) = self.stream_read(&mut buf)
+                        {
+                            self.detach(Some(e));
+                            continue;
                         }
                         if event.writable
                             && let Some(attached) = &mut self.attached

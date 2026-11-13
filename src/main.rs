@@ -41,6 +41,8 @@ pub(crate) fn menus() -> Vec<Menu> {
         // Services and app hiding are AppKit concepts with no Wayland/X11
         // equivalent; a tiling WM has nowhere to hide a window to.
         omnipty.extend([
+            // Linux installs already put the binary on PATH.
+            MenuItem::action("Install omnipty CLI", InstallCli),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -210,6 +212,18 @@ fn main() {
         let (config, error) = config::load();
         app::open_omnipty_window(config, error, None, None, cx);
     });
+    // Folders handed to the app as documents: `open -a OmniPTY <dir>` (what
+    // the CLI shim does once the app is running, since `--args` only reaches
+    // a fresh launch) or a folder dropped on the Dock icon. Each opens a
+    // window there, like New Window.
+    let (dir_tx, mut dir_rx) = futures::channel::mpsc::unbounded();
+    app.on_open_urls(move |urls| {
+        for dir in urls.iter().filter_map(|u| terminal::osc::parse_cwd(u)) {
+            if dir.is_dir() {
+                dir_tx.unbounded_send(dir).ok();
+            }
+        }
+    });
     app.run(move |cx: &mut App| {
         // macOS quits through [NSApp terminate:], which exits without coming
         // back here, so `_sentry` is never dropped. End the session and flush
@@ -296,6 +310,18 @@ fn main() {
         if cfg!(target_os = "macos") {
             cx.set_menus(menus());
         }
+
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while let Some(dir) = dir_rx.next().await {
+                cx.update(|cx| {
+                    let (config, error) = config::load();
+                    app::open_omnipty_window(config, error, Some(dir), None, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
 
         // Notification clicks arrive on the AppKit main thread through a
         // channel; whichever window owns the routed pane brings it forward.

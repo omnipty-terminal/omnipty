@@ -826,7 +826,7 @@ mod tests {
         );
         let answered = |rx: &mut UnboundedReceiver<SessionEvent>| {
             let mut n = 0;
-            while let Ok(Some(event)) = rx.try_next() {
+            while let Ok(event) = rx.try_recv() {
                 if matches!(event, SessionEvent::Term(AlacEvent::PtyWrite(_))) {
                     n += 1;
                 }
