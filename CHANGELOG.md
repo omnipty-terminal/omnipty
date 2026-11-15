@@ -27,7 +27,10 @@ write for users: what changed and why it matters, not which files moved.
   end with the window. **Quit and End
   Sessions**, in the app menu and the command palette, stops everything on
   the way out. A shell that didn't survive — after a reboot, say — starts
-  fresh in its directory and runs its startup command as before. To go back
+  fresh in its directory and runs its startup command as before; one that
+  reattaches doesn't run it again, and a startup command still running from
+  before keeps its `on_exit`, so `restart` and `close` work after the
+  reattach. To go back
   to fresh shells on every launch, set `persist_sessions = false` under
   `[workspaces]`.
 

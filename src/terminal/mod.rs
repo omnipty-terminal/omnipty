@@ -206,6 +206,23 @@ enum StartupPhase {
     RestartWait,
     /// Ran (or was given up on). Nothing more happens automatically.
     Done,
+    /// The shell was reattached, and its replay is still being read for
+    /// whether the startup command is running from before the quit. `None`:
+    /// can't tell from the replay (no command start in it, or one without
+    /// its command line), so the foreground program decides.
+    Reattached { running: Option<bool> },
+}
+
+/// One replayed marker's effect on "is the startup command still running?"
+/// The last command start decides, and an end means nothing is running.
+fn reattach_step(running: Option<bool>, kind: &MarkerKind, startup: &str) -> Option<bool> {
+    match kind {
+        MarkerKind::CommandStart { cmdline } => cmdline
+            .as_deref()
+            .map(|c| c.trim() == startup.trim()),
+        MarkerKind::CommandEnd { .. } => Some(false),
+        _ => running,
+    }
 }
 
 /// Copy mode's sub-mode, for the indicator.
@@ -761,6 +778,7 @@ impl TerminalPane {
                                 SessionEvent::Term(event) => pane.handle_alac_event(event, cx),
                                 SessionEvent::Marker(marker) => pane.handle_marker(marker, cx),
                                 SessionEvent::Graphics(event) => pane.handle_graphics(event, cx),
+                                SessionEvent::Replayed => pane.on_replayed(cx),
                             }
                         }
                     })
@@ -1949,6 +1967,38 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// The shell was reattached rather than started, so its startup command
+    /// may still be running from before the quit. Read the replay to find
+    /// out (`on_replayed`), so `on_exit` applies to it again.
+    pub fn adopt_startup(&mut self) {
+        if self.startup.is_some() && self.startup_uses_markers() {
+            self.startup_phase = StartupPhase::Reattached { running: None };
+        }
+    }
+
+    fn on_replayed(&mut self, cx: &mut Context<Self>) {
+        let StartupPhase::Reattached { running } = self.startup_phase else {
+            return;
+        };
+        // ponytail: when the replay can't tell (a chatty command pushed its
+        // own start out of the 2 MiB ring, or the shell sends no command
+        // lines), a program in the foreground is taken to be the startup
+        // command.
+        let running = running.unwrap_or_else(|| {
+            self.session
+                .as_ref()
+                .and_then(|s| s.foreground_process())
+                .is_some_and(|f| !f.is_shell())
+        });
+        self.startup_phase = if running {
+            self.restart_gate.record_start(Instant::now());
+            StartupPhase::Running
+        } else {
+            StartupPhase::Done
+        };
+        cx.notify();
+    }
+
     /// Drop a queued startup command before it fires (shift held at launch,
     /// noticed only once the window has keyboard focus). Returns whether
     /// one was pending.
@@ -2023,6 +2073,12 @@ impl TerminalPane {
             (MarkerKind::CommandEnd { exit }, StartupPhase::Running) => {
                 let exit = *exit;
                 self.startup_finished(exit, cx);
+            }
+            (kind, StartupPhase::Reattached { running }) => {
+                if let Some(startup) = &self.startup {
+                    let running = reattach_step(running, kind, &startup.command);
+                    self.startup_phase = StartupPhase::Reattached { running };
+                }
             }
             _ => {}
         }
@@ -3309,6 +3365,47 @@ mod wheel_tests {
         assert_eq!(
             wheel_target(TermMode::ALTERNATE_SCROLL, false),
             WheelTarget::Scrollback
+        );
+    }
+}
+
+#[cfg(test)]
+mod reattach_tests {
+    use super::*;
+
+    fn start(cmd: &str) -> MarkerKind {
+        MarkerKind::CommandStart {
+            cmdline: Some(cmd.into()),
+        }
+    }
+
+    /// Fold a replay's markers the way `track_startup_marker` does.
+    fn replay(kinds: &[MarkerKind]) -> Option<bool> {
+        kinds
+            .iter()
+            .fold(None, |r, k| reattach_step(r, k, "npm run dev"))
+    }
+
+    #[test]
+    fn the_last_command_start_decides_whether_startup_is_running() {
+        let end = MarkerKind::CommandEnd { exit: Some(0) };
+        assert_eq!(replay(&[]), None, "nothing seen: fall back to the foreground");
+        assert_eq!(replay(&[start("npm run dev ")]), Some(true));
+        assert_eq!(replay(&[start("npm run dev"), end.clone()]), Some(false));
+        assert_eq!(
+            replay(&[start("npm run dev"), end, start("vim")]),
+            Some(false),
+            "something else is running now"
+        );
+        assert_eq!(
+            replay(&[start("npm run dev"), MarkerKind::PromptStart]),
+            Some(true),
+            "other markers change nothing"
+        );
+        assert_eq!(
+            replay(&[MarkerKind::CommandStart { cmdline: None }]),
+            None,
+            "no command line: can't tell"
         );
     }
 }

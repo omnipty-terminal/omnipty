@@ -102,6 +102,9 @@ pub enum SessionEvent {
     Term(AlacEvent),
     Marker(Marker),
     Graphics(GraphicsEvent),
+    /// A reattached session's history has been fed: every event before this
+    /// one came from the replay, every one after is live.
+    Replayed,
 }
 
 /// What parsing a chunk produced besides changes to the `Term`.
@@ -417,6 +420,7 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
             }
         }
         if replayed {
+            (self.events)(SessionEvent::Replayed);
             // A same-size resize sends no SIGWINCH, so a full-screen program
             // would sit on its stale picture: go one column narrower, then
             // back, the way tmux does on attach.

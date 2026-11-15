@@ -2945,14 +2945,23 @@ impl OmniPTY {
     /// intent.
     fn after_startup_edit(&mut self, wix: Option<usize>, any_set: bool, cx: &mut Context<Self>) {
         self.save_workspaces(cx);
-        if any_set
-            && let Some(ws) = wix.and_then(|w| self.workspaces.get(w))
-            && !ws.persist
-        {
-            self.toast(ToastKind::Info,
-                format!("startup command set — pin \"{}\" (p in the workspaces panel) to keep it across restarts", ws.name),
-                cx,
-            );
+        if any_set && let Some(ws) = wix.and_then(|w| self.workspaces.get(w)) {
+            if !ws.persist {
+                self.toast(ToastKind::Info,
+                    format!("startup command set — pin \"{}\" (p in the workspaces panel) to keep it across restarts", ws.name),
+                    cx,
+                );
+            } else if self.remote {
+                // The shell is kept across quits, so a relaunch reattaches
+                // instead of running anything: say when it will run.
+                self.toast(
+                    ToastKind::Info,
+                    "startup command saved — it runs when a fresh shell starts, not when a \
+                     running one is reattached"
+                        .into(),
+                    cx,
+                );
+            }
         }
         cx.notify();
     }
@@ -5368,7 +5377,9 @@ impl OmniPTY {
             let timeout = self.config.workspaces.startup_timeout.0;
             self.panes[&id].update(cx, |pane, cx| {
                 pane.set_startup(Some(startup), cx);
-                if run && !attached {
+                if attached {
+                    pane.adopt_startup();
+                } else if run {
                     pane.arm_startup(timeout, cx);
                 }
             });
