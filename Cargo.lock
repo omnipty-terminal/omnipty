@@ -4273,7 +4273,7 @@ dependencies = [
 
 [[package]]
 name = "omnipty"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
