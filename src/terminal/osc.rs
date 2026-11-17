@@ -105,7 +105,7 @@ fn parse_133(rest: &str) -> Option<MarkerKind> {
 /// `file://host/path` → the path, for hosts that mean this machine. A
 /// remote shell's cwd (over ssh) is real but not somewhere the file tree
 /// can go, so it is ignored.
-fn parse_cwd(url: &str) -> Option<PathBuf> {
+pub(crate) fn parse_cwd(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
     let (host, path) = {
         let ix = rest.find('/')?;

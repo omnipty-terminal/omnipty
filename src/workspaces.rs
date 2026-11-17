@@ -1,12 +1,14 @@
-//! Workspace persistence: layout, directories, and startup commands,
-//! restored with fresh shells.
+//! Workspace persistence: layout, directories, startup commands, and — with
+//! `workspaces.persist_sessions` — the shells themselves.
 //!
-//! A workspace marked `persist` survives app restarts the way an iTerm2/kitty
-//! session does — the shape (tabs, splits) and each pane's working directory
-//! come back, with new shells spawned in those directories. Running programs
-//! cannot survive a full quit (tmux gets away with it only because its server
-//! never exits), so a pane can instead declare a *startup command* that is
-//! re-run on restore — the tmuxinator model.
+//! A workspace marked `persist` survives app restarts. Its shape (tabs,
+//! splits) and each pane's working directory are saved here; the shells run
+//! in the session server (`crate::server`), which outlives the app the way
+//! tmux's does, so a restore reattaches to them (`SavedPane::session`) and
+//! they come back with their output and whatever was running. A shell that
+//! didn't survive (a reboot, the server ended, the option off) is started
+//! fresh in its directory, and a pane can declare a *startup command* to
+//! re-run then — the tmuxinator model.
 //!
 //! On disk: `{ "version": 3, "workspaces": [...] }`. Every leaf is a
 //! `SavedPane` object. Version 2 (v0.4.0) wrote leaves as bare directory
@@ -31,6 +33,11 @@ pub struct SavedWorkspace {
     pub name: String,
     pub active_tab: usize,
     pub tabs: Vec<SavedTab>,
+    /// The workspace its window had in front when it was saved; a restore
+    /// selects it again. A flag per workspace rather than one index for the
+    /// file, because each window saves only the workspaces it holds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -57,6 +64,11 @@ pub struct SavedPane {
     /// What to do when the command exits.
     #[serde(default, skip_serializing_if = "is_default_on_exit")]
     pub on_exit: OnExit,
+    /// The session-server id of the shell that was running here, so a
+    /// restore can reattach to it instead of starting a new one. Absent in
+    /// files written before v0.10, and for panes that ran in-process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 fn is_default_on_exit(on_exit: &OnExit) -> bool {
@@ -69,6 +81,7 @@ impl SavedPane {
             cwd,
             command: None,
             on_exit: OnExit::default(),
+            session: None,
         }
     }
 
@@ -128,6 +141,8 @@ struct RawWorkspace {
     name: String,
     active_tab: usize,
     tabs: Vec<RawTab>,
+    #[serde(default)]
+    active: bool,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +157,7 @@ impl From<RawWorkspace> for SavedWorkspace {
     fn from(raw: RawWorkspace) -> Self {
         SavedWorkspace {
             name: raw.name,
+            active: raw.active,
             active_tab: raw.active_tab,
             tabs: raw
                 .tabs
@@ -184,6 +200,20 @@ pub fn state_path() -> Option<PathBuf> {
     Some(crate::paths::cache_dir().join("workspaces.json"))
 }
 
+/// Every session id the file refers to: the shells a launch would try to
+/// reattach, and so the ones the session server must keep.
+pub fn saved_sessions() -> Vec<String> {
+    let Some(path) = state_path() else {
+        return Vec::new();
+    };
+    load_from(&path)
+        .iter()
+        .flat_map(|w| &w.tabs)
+        .flat_map(|t| t.layout.leaves())
+        .filter_map(|p| p.session)
+        .collect()
+}
+
 /// Read any format version we've ever written. Returns the version the file
 /// was written in alongside the workspaces. Split ratios are normalised on
 /// the way in so a v1 file (no ratios) or a hand-edited one (nonsense
@@ -221,7 +251,6 @@ fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
-
 
 pub fn load_from(path: &Path) -> Vec<SavedWorkspace> {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -418,6 +447,7 @@ mod tests {
     fn sample() -> Vec<SavedWorkspace> {
         vec![SavedWorkspace {
             name: "workspace 1".into(),
+            active: true,
             active_tab: 1,
             tabs: vec![
                 SavedTab {
@@ -433,6 +463,7 @@ mod tests {
                                 cwd: PathBuf::from("/Users/x/dev"),
                                 command: Some("cargo watch -x check".into()),
                                 on_exit: OnExit::Restart,
+                                session: Some("4242-0-1762700000".into()),
                             }),
                             Node::Split {
                                 axis: Axis::Vertical,
@@ -441,6 +472,7 @@ mod tests {
                                         cwd: PathBuf::from("/Users/x/dev/a"),
                                         command: Some("npm run dev".into()),
                                         on_exit: OnExit::Close,
+                                        session: None,
                                     }),
                                     Node::Leaf(SavedPane::shell(PathBuf::from("/Users/x/dev/b"))),
                                 ],
@@ -469,8 +501,9 @@ mod tests {
         assert_eq!(version, 3);
         assert_eq!(
             ws, back,
-            "ratios, titles, commands and on_exit must survive the round trip"
+            "ratios, titles, commands, on_exit and session ids must survive the round trip"
         );
+        assert!(json.contains(r#""session":"4242-0-1762700000""#), "{json}");
         assert!(
             !json.contains("\"title\":null"),
             "unset titles stay out of the file"
@@ -676,6 +709,7 @@ mod tests {
             cwd: PathBuf::from(format!("/dir{id}")),
             command: (*id == 2).then(|| "make".to_string()),
             on_exit: OnExit::Close,
+            session: None,
         });
         let leaves = panes.leaves();
         assert_eq!(leaves[0].cwd, PathBuf::from("/dir1"));
@@ -695,6 +729,7 @@ mod tests {
             cwd: "/".into(),
             command: Some("   ".into()),
             on_exit: OnExit::Restart,
+            session: None,
         };
         assert_eq!(pane.startup(), None);
     }

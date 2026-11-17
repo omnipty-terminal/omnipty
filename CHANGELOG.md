@@ -11,6 +11,36 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Install the `omnipty` command from the app on macOS.** OmniPTY →
+  Install omnipty CLI puts it on your `PATH` (it asks for your password), so
+  `omnipty ~/Code` opens a window there from any terminal, whether or not
+  OmniPTY is already running. No more copying a script out of a clone of the
+  repo. Dropping a folder on the Dock icon opens a window there too.
+- **Pinned workspaces keep their shells running.** Quit OmniPTY and the
+  shells in your pinned workspaces carry on in the background, the way tmux's
+  server keeps them; the next launch picks them up where they were, scrollback
+  and all, with whatever was running still running. A crash leaves them
+  running too. Pinning a workspace says so, so a dev server that's still
+  holding its port after you quit isn't a mystery. Unpinned workspaces still
+  end with the window. **Quit and End
+  Sessions**, in the app menu and the command palette, stops everything on
+  the way out. A shell that didn't survive — after a reboot, say — starts
+  fresh in its directory and runs its startup command as before; one that
+  reattaches doesn't run it again, and a startup command still running from
+  before keeps its `on_exit`, so `restart` and `close` work after the
+  reattach. To go back
+  to fresh shells on every launch, set `persist_sessions = false` under
+  `[workspaces]`.
+
+### Changed
+
+- **OmniPTY reopens on the workspace you left.** The pinned workspace that
+  was in front when you quit is selected again on the next launch, instead of
+  always the first in the list.
+
+
 ## [0.9.4] - 2026-11-06
 
 ### Added

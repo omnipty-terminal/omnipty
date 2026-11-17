@@ -18,6 +18,7 @@ const REVEAL_TITLE: &str = if cfg!(target_os = "macos") {
 omnipty_actions! {
     // --- Application ---
     Quit            => "app::quit",              "Quit OmniPTY",              "Application", ["exit"], Root;
+    QuitAndEndSessions => "app::quit_end_sessions", "Quit and End Sessions",   "Application", ["exit", "kill server", "stop shells"], Root;
     About           => "app::about",             "About OmniPTY",             "Application", [], Root;
     OpenSettings    => "app::settings",          "Open Settings",           "Application", ["config", "preferences"], Root;
     SelectTheme     => "app::select_theme",      "Select Theme",            "Application", ["colors", "preset"], Root;
@@ -33,6 +34,7 @@ omnipty_actions! {
     InstallUpdate   => "app::install_update",    "Install Downloaded Update", "Application", [], Root;
     ToggleStatusBar => "app::toggle_status_bar", "Toggle Status Bar",       "Application", [], Root;
     ToggleTabBar    => "app::toggle_tab_bar",    "Toggle Tab Bar",          "Application", ["hide tabs", "show tabs"], Root;
+    InstallCli      => "app::install_cli",       "Install omnipty CLI",     "Application", ["command line", "shell command", "path"], Root;
     ShowAppMenu     => "app::menu",              "Show App Menu",           "Application", ["hamburger", "menu bar"], Root;
 
     // --- Window ---
