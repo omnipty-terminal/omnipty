@@ -9,9 +9,9 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor}
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, DispatchPhase, Element, ElementId, Entity,
     Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    RenderImage, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle,
-    Window, fill, point, px, quad, relative, size,
+    IntoElement, LayoutId, LineLayout, MouseButton, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, RenderImage, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun,
+    UnderlineStyle, Window, fill, point, px, quad, relative, size,
 };
 
 use super::TerminalPane;
@@ -579,6 +579,7 @@ fn layout_grid(
             row,
             &theme,
             font_size,
+            cell_width,
             &text_system,
             selection.as_ref(),
             selected_line,
@@ -788,6 +789,7 @@ fn shape_row(
     row: &[CellSnap],
     theme: &Theme,
     font_size: Pixels,
+    cell_width: f32,
     text_system: &std::sync::Arc<gpui::WindowTextSystem>,
     selection: Option<&SelectionRange>,
     line: alacritty_terminal::index::Line,
@@ -807,8 +809,11 @@ fn shape_row(
 
     let mut text = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
+    // Each cell's first byte in `text` and its column, for snap_to_grid.
+    let mut cells: Vec<(usize, usize)> = Vec::with_capacity(last + 1);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     f32::from(font_size).to_bits().hash(&mut hasher);
+    cell_width.to_bits().hash(&mut hasher);
 
     // Only a configured selection_fg recolours selected text; otherwise the
     // selection is just the background quad and the cache key is untouched.
@@ -880,6 +885,7 @@ fn shape_row(
         };
 
         let start_len = text.len();
+        cells.push((start_len, cell_col));
         text.push(display_char(cell.c));
         if let Some(zw) = &cell.zerowidth {
             text.extend(zw.iter());
@@ -944,9 +950,76 @@ fn shape_row(
     if let Some(line) = pane.shape_cache.get(&key) {
         return Some(line.clone());
     }
-    let line = text_system.shape_line(SharedString::from(text), font_size, &runs, None);
+    let mut line = text_system.shape_line(SharedString::from(text), font_size, &runs, None);
+    snap_to_grid(&mut line, &cells, col, cell_width);
     pane.shape_cache.insert(key, line.clone());
     Some(line)
+}
+
+/// Pin every glyph to its cell. Shaping places each glyph after the advance
+/// of the one before, so a glyph that isn't exactly a cell wide (braille or a
+/// symbol from a fallback font, a CJK glyph that isn't quite two cells)
+/// carries the rest of the row off the grid while the background quads stay
+/// put. GPUI's `force_width` can't do this: it counts glyphs, not columns, so
+/// a wide character or a combining mark would throw off everything after it.
+fn snap_to_grid(line: &mut ShapedLine, cells: &[(usize, usize)], cols: usize, cell_width: f32) {
+    let glyphs = || line.runs.iter().flat_map(|run| run.glyphs.iter());
+    let xs = grid_positions(
+        glyphs().map(|glyph| (glyph.index, f32::from(glyph.position.x))),
+        cells,
+        cell_width,
+    );
+    if glyphs()
+        .zip(&xs)
+        .all(|(glyph, &x)| (f32::from(glyph.position.x) - x).abs() < 0.01)
+    {
+        // Already on the grid, the usual case: keep the shared layout.
+        return;
+    }
+    let mut runs = line.runs.clone();
+    for (glyph, x) in runs
+        .iter_mut()
+        .flat_map(|run| run.glyphs.iter_mut())
+        .zip(xs)
+    {
+        glyph.position.x = px(x);
+    }
+    let layout = LineLayout {
+        font_size: line.font_size,
+        width: px(cols as f32 * cell_width),
+        ascent: line.ascent,
+        descent: line.descent,
+        runs,
+        len: line.len,
+    };
+    **line = Arc::new(layout);
+}
+
+/// Where each glyph goes: the left edge of its cell. `glyphs` is each
+/// glyph's byte index into the row's text and its shaped x, in paint order;
+/// `cells` is each cell's first byte and column. Later glyphs in a cell
+/// (combining marks) move with the first, so they stay over their base.
+fn grid_positions(
+    glyphs: impl Iterator<Item = (usize, f32)>,
+    cells: &[(usize, usize)],
+    cell_width: f32,
+) -> Vec<f32> {
+    let mut cell = usize::MAX;
+    let mut shift = 0.0;
+    glyphs
+        .map(|(index, x)| {
+            let i = cells
+                .partition_point(|&(start, _)| start <= index)
+                .saturating_sub(1);
+            if i != cell {
+                cell = i;
+                shift = cells
+                    .get(i)
+                    .map_or(0.0, |&(_, col)| col as f32 * cell_width - x);
+            }
+            x + shift
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1032,5 +1105,26 @@ mod tests {
         assert_eq!(display_char('a'), 'a');
         assert_eq!(display_char('漢'), '漢');
         assert_eq!(display_char('\u{e0b0}'), '\u{e0b0}');
+    }
+
+    #[test]
+    fn glyphs_sit_in_their_cells() {
+        // "⣿⣿.|" with fallback braille 10px wide in an 8px cell: each braille
+        // glyph used to push the rest of the row 2px further right.
+        let cells = [(0, 0), (3, 1), (6, 2), (7, 3)];
+        let shaped = [(0, 0.0), (3, 10.0), (6, 20.0), (7, 28.0)];
+        assert_eq!(
+            grid_positions(shaped.into_iter(), &cells, 8.0),
+            [0.0, 8.0, 16.0, 24.0]
+        );
+
+        // "ae\u{301}中b": a wide glyph takes two columns, and the accent
+        // keeps its offset from the 'e' it sits on.
+        let cells = [(0, 0), (1, 1), (4, 2), (7, 4)];
+        let shaped = [(0, 0.0), (1, 9.0), (2, 9.5), (4, 17.0), (7, 34.0)];
+        assert_eq!(
+            grid_positions(shaped.into_iter(), &cells, 8.0),
+            [0.0, 8.0, 8.5, 16.0, 32.0]
+        );
     }
 }

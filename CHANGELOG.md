@@ -11,6 +11,15 @@ write for users: what changed and why it matters, not which files moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Braille and other fallback-font characters stay on the grid.** A
+  character your font doesn't have is drawn from a fallback font, and if that
+  font's version was a little wider than a cell, it pushed the rest of the
+  line to the right, out of line with its background colours. Braille
+  graphics drifted further with every character and could run off the edge
+  of the pane. Every character now sits in its own cell.
+
 ## [0.10.0] - 2026-11-17
 
 ### Added
