@@ -123,6 +123,11 @@ pub enum Frame {
     Replay(Vec<u8>),
     Output(Vec<u8>),
     Exited(i32),
+    /// The server ended the pane on an error of its own (a failed PTY read,
+    /// a panic), and says why before closing the socket. Sent instead of
+    /// `Exited`; a 0.10.0 app reads it as an unknown tag, which still
+    /// reports the failure.
+    Failed(String),
 }
 
 const TAG_INPUT: u8 = 1;
@@ -130,6 +135,7 @@ const TAG_RESIZE: u8 = 2;
 const TAG_REPLAY: u8 = 3;
 const TAG_OUTPUT: u8 = 4;
 const TAG_EXITED: u8 = 5;
+const TAG_FAILED: u8 = 6;
 const HEADER: usize = 5;
 
 /// `[tag][u32 BE length][payload]`.
@@ -148,6 +154,7 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
         Frame::Replay(bytes) => (TAG_REPLAY, bytes.clone()),
         Frame::Output(bytes) => (TAG_OUTPUT, bytes.clone()),
         Frame::Exited(status) => (TAG_EXITED, status.to_be_bytes().to_vec()),
+        Frame::Failed(reason) => (TAG_FAILED, reason.as_bytes().to_vec()),
     };
     let mut out = Vec::with_capacity(HEADER + payload.len());
     out.push(tag);
@@ -166,6 +173,7 @@ pub fn header(tag_of: &Frame, len: usize) -> [u8; HEADER] {
         Frame::Replay(_) => TAG_REPLAY,
         Frame::Output(_) => TAG_OUTPUT,
         Frame::Exited(_) => TAG_EXITED,
+        Frame::Failed(_) => TAG_FAILED,
     };
     let len = (len as u32).to_be_bytes();
     [tag, len[0], len[1], len[2], len[3]]
@@ -225,6 +233,7 @@ impl Decoder {
                     payload[0], payload[1], payload[2], payload[3],
                 ]))
             }
+            TAG_FAILED => Frame::Failed(String::from_utf8_lossy(&payload).into_owned()),
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -347,6 +356,37 @@ pub mod fdpass {
 /// locally).
 pub fn connect() -> io::Result<Stream> {
     Stream::connect(endpoint())
+}
+
+/// Whether a server is listening: tells "the server dropped this pane" from
+/// "the server is gone" once a pane's socket has closed.
+pub fn server_answers() -> bool {
+    connect().is_ok()
+}
+
+/// The server log's last few lines about session `id`, plus any panic, as
+/// one line for a crash report. Only lines the server itself wrote about
+/// this pane go in: no paths, no output.
+pub fn server_log_about(id: &str) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    // The tail is plenty; the log is never trimmed.
+    const TAIL: u64 = 64 * 1024;
+    let Ok(mut file) = std::fs::File::open(crate::paths::cache_dir().join("server.log")) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(TAIL)));
+    let mut tail = Vec::new();
+    let _ = file.read_to_end(&mut tail);
+    log_lines_about(&String::from_utf8_lossy(&tail), id)
+}
+
+fn log_lines_about(log: &str, id: &str) -> String {
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(id) || l.contains("panic"))
+        .collect();
+    lines[lines.len().saturating_sub(5)..].join(" | ")
 }
 
 /// Connect, starting the server if nothing is listening. Gives up after a
@@ -513,6 +553,19 @@ mod tests {
         }
     }
 
+    /// A crash report gets the server's last lines about this pane and any
+    /// panic, never another pane's.
+    #[test]
+    fn log_excerpt_keeps_this_pane_and_panics() {
+        let log = "1 [9] spawned a-1 pid 5\n1 [9] spawned b-2 pid 6\n\
+                   2 [9] pane b-2 panicked: oops\n3 [9] a-1: ended: pty read failed\n";
+        assert_eq!(
+            log_lines_about(log, "a-1"),
+            "1 [9] spawned a-1 pid 5 | 2 [9] pane b-2 panicked: oops | 3 [9] a-1: ended: pty read failed"
+        );
+        assert_eq!(log_lines_about("", "a-1"), "");
+    }
+
     /// Every frame kind survives encoding, and the decoder reassembles
     /// frames from one byte at a time.
     #[test]
@@ -523,6 +576,7 @@ mod tests {
             Frame::Replay(vec![0u8; 70_000]),
             Frame::Output(b"hello".to_vec()),
             Frame::Exited(-3),
+            Frame::Failed("pty read failed: Bad address (os error 14)".into()),
             Frame::Input(Vec::new()),
         ];
         let wire: Vec<u8> = frames.iter().flat_map(encode).collect();

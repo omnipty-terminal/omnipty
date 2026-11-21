@@ -330,7 +330,7 @@ impl TerminalSession {
             master_fd: attached.master.as_raw_fd(),
             child_pid: attached.pid as i32,
         };
-        let endpoint = Endpoint::Remote(Remote::new(attached.stream, attached.leftover, size));
+        let endpoint = Endpoint::Remote(Remote::new(id, attached.stream, attached.leftover, size));
         Self::start(
             endpoint,
             handle,
@@ -902,5 +902,74 @@ mod tests {
 
         let cwd = session.foreground_cwd();
         assert!(cwd.is_some(), "foreground cwd lookup failed");
+    }
+
+    /// A shell under the server that exits on its own: the server writes its
+    /// last output and the exit status, then closes the socket. Those can
+    /// all arrive in one read, and the pane must still see the output and
+    /// the status rather than calling the close a dead server (RUST-7).
+    #[test]
+    fn remote_exit_status_survives_the_close_that_follows_it() {
+        let dir = std::env::temp_dir().join(format!("omnipty-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s.sock");
+        {
+            let (socket, lock) = (socket.clone(), dir.join("s.lock"));
+            std::thread::spawn(move || {
+                crate::server::run(&socket, &lock, || {}).expect("server runs");
+            });
+        }
+        let connect = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(s) = remote::Stream::connect(&socket) {
+                    return s;
+                }
+                assert!(Instant::now() < deadline, "server never listened");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let size = TermSize {
+            columns: 80,
+            screen_lines: 24,
+            cell_width: 8.0,
+            cell_height: 16.0,
+            scale: 1.0,
+        };
+        let id = "exit-test-0".to_string();
+        remote::spawn_on(
+            connect(),
+            remote::Request::Spawn {
+                id: id.clone(),
+                program: "/bin/sh".into(),
+                // Waits for a line, so the attach is in place before it exits.
+                args: vec!["-c".into(), "read x; echo last_words_$((40+2)); exit 3".into()],
+                cwd: None,
+                env: session_env(HashMap::new(), &id),
+                size,
+                persist: false,
+            },
+        )
+        .expect("spawn via server");
+        let (session, mut rx) =
+            TerminalSession::attach_on(connect(), &id, 100, false, size).expect("attach");
+        session.write_input(b"\r".to_vec());
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            assert!(Instant::now() < deadline, "no exit seen");
+            match rx.try_recv() {
+                Ok(SessionEvent::Term(AlacEvent::ChildExit(status))) => break status,
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        assert_eq!(status.code(), Some(3), "the shell's own status");
+        assert!(
+            visible_text(&session).contains("last_words_42"),
+            "the output sent just before the exit:\n{}",
+            visible_text(&session)
+        );
     }
 }

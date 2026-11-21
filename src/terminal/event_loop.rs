@@ -60,6 +60,18 @@ fn pty_failed(what: &'static str, err: &io::Error) {
     crate::telemetry::report(what, err);
 }
 
+/// The server's own reason for ending a pane (a `Failed` frame).
+#[derive(Debug)]
+struct PaneEnded(String);
+
+impl std::fmt::Display for PaneEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PaneEnded {}
+
 /// Tell the PTY its new size. Not alacritty's `on_resize`: its `WindowSize`
 /// holds a whole-pixel cell, and columns times a rounded 16.8 misstates the
 /// width by a cell or more, which is what programs place images by.
@@ -195,6 +207,8 @@ pub enum Endpoint {
 }
 
 pub struct Remote {
+    /// The pane's session id, to find its lines in the server's log.
+    id: String,
     stream: remote::Stream,
     decoder: remote::Decoder,
     /// The grid size last told to the server, for the size wiggle after a
@@ -204,10 +218,11 @@ pub struct Remote {
 
 impl Remote {
     /// `leftover`: frame bytes that arrived with the attach reply.
-    pub fn new(stream: remote::Stream, leftover: Vec<u8>, size: TermSize) -> Self {
+    pub fn new(id: &str, stream: remote::Stream, leftover: Vec<u8>, size: TermSize) -> Self {
         let mut decoder = remote::Decoder::default();
         decoder.push(&leftover);
         Self {
+            id: id.to_string(),
             stream,
             decoder,
             size,
@@ -359,19 +374,22 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
     }
 
     /// The remote end's read: frames off the socket. `Ok(Some(raw))` is the
-    /// shell's exit (its raw wait status, -1 when the server didn't know);
-    /// EOF is the server itself going away.
+    /// shell's exit (its raw wait status, -1 when the server didn't know).
+    /// A `Failed` frame is a `PaneEnded` error; EOF with neither is the
+    /// server going away, or dropping the pane without a word.
     fn remote_read(&mut self, state: &mut State, buf: &mut [u8]) -> io::Result<Option<i32>> {
         let Endpoint::Remote(remote) = &mut self.endpoint else {
             unreachable!("remote_read is the remote endpoint's");
         };
+        // The server closes the socket right after the exit status, so the
+        // close often comes in the same read as the shell's last output and
+        // that status: decode what came first, then look at the close.
+        let mut eof = false;
         loop {
             match remote.stream.read(buf) {
                 Ok(0) => {
-                    return Err(io::Error::new(
-                        ErrorKind::UnexpectedEof,
-                        "session server closed the connection",
-                    ));
+                    eof = true;
+                    break;
                 }
                 Ok(got) => remote.decoder.push(&buf[..got]),
                 Err(err) => match err.kind() {
@@ -385,14 +403,21 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
         while let Some(frame) = remote.decoder.next()? {
             frames.push(frame);
         }
+        let closed = || {
+            io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "session server closed the connection",
+            )
+        };
         if frames.is_empty() {
-            return Ok(None);
+            return if eof { Err(closed()) } else { Ok(None) };
         }
         let size = remote.size;
 
         let term = Arc::clone(&self.term);
         let mut processed = 0;
         let mut exited = None;
+        let mut failed = None;
         let mut replayed = false;
         {
             let mut terminal = term.lock_unfair();
@@ -414,6 +439,7 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                         processed += bytes.len();
                     }
                     remote::Frame::Exited(raw) => exited = Some(raw),
+                    remote::Frame::Failed(reason) => failed = Some(reason),
                     // Only the GUI sends these.
                     remote::Frame::Input(_) | remote::Frame::Resize(_) => {}
                 }
@@ -435,6 +461,12 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
         }
         if state.parser.sync_bytes_count() < processed && processed > 0 {
             self.listener.send_event(AlacEvent::Wakeup);
+        }
+        if let Some(reason) = failed {
+            return Err(io::Error::other(PaneEnded(reason)));
+        }
+        if eof && exited.is_none() {
+            return Err(closed());
         }
         Ok(exited)
     }
@@ -488,6 +520,35 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
             *hung_up = true;
             self.listener.send_event(AlacEvent::Wakeup);
         }
+    }
+
+    /// Why the server stopped serving this pane, as precisely as can be told
+    /// from here: each case is its own Sentry issue, with the server's log
+    /// lines about the pane attached when it said nothing itself.
+    fn report_lost_pane(&self, err: &io::Error) {
+        let Endpoint::Remote(remote) = &self.endpoint else {
+            return;
+        };
+        let ended = err.get_ref().and_then(|e| e.downcast_ref::<PaneEnded>());
+        let what = if ended.is_some() {
+            "session server ended a pane"
+        } else if err.kind() != ErrorKind::UnexpectedEof {
+            "session server read failed"
+        } else if remote::server_answers() {
+            "session server dropped a pane"
+        } else {
+            "session server exited"
+        };
+        let mut detail = err.to_string();
+        if ended.is_none() {
+            let log = remote::server_log_about(&remote.id);
+            if !log.is_empty() {
+                detail.push_str(" | server.log: ");
+                detail.push_str(&log);
+            }
+        }
+        eprintln!("omnipty: {what}: {detail}");
+        crate::telemetry::report(what, detail);
     }
 
     /// The shell is gone: tell the pane, and stop.
@@ -608,11 +669,11 @@ impl<L: EventListener + Send + 'static> EventLoop<L> {
                                         break 'event_loop;
                                     }
                                     Err(err) => {
-                                        // The server itself is gone, and the
-                                        // shell with it as far as this pane can
-                                        // tell: a hangup, so the pane shows its
-                                        // exit overlay rather than sitting dead.
-                                        pty_failed("session server exited", &err);
+                                        // The shell is gone as far as this
+                                        // pane can tell: a hangup, so the pane
+                                        // shows its exit overlay rather than
+                                        // sitting dead.
+                                        self.report_lost_pane(&err);
                                         self.exited(Some(libc::SIGHUP));
                                         break 'event_loop;
                                     }

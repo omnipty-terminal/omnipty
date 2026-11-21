@@ -12,7 +12,9 @@
 //! replay of the ring, which is how the screen comes back.
 //!
 //! The server exits once it has no panes and no connections. It logs to
-//! `<cache>/server.log`; it has no stdio and no crash reporting of its own.
+//! `<cache>/server.log`; it has no stdio and no crash reporting of its own,
+//! so a pane it ends on an error says why to its GUI (`Frame::Failed`), and
+//! the GUI's report carries the reason.
 //!
 //! windows-port: the listener becomes a named pipe (`platform::win`), the
 //! detached spawn is in `remote::start_server`, `fdpass` stays Unix-only.
@@ -46,7 +48,12 @@ const STREAM_TOKEN: usize = 2;
 const RING_BYTES: usize = 2 * 1024 * 1024;
 
 fn log(message: impl std::fmt::Display) {
-    let path = crate::paths::cache_dir().join("server.log");
+    // Tests run servers in-process; their chatter stays out of the real log.
+    let path = if cfg!(test) {
+        std::env::temp_dir().join("omnipty-test-server.log")
+    } else {
+        crate::paths::cache_dir().join("server.log")
+    };
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -58,6 +65,34 @@ fn log(message: impl std::fmt::Display) {
             .unwrap_or(0);
         let _ = writeln!(f, "{now} [{}] {message}", std::process::id());
     }
+}
+
+thread_local! {
+    /// The last panic on this thread, as the hook saw it (message and
+    /// location), for the `Failed` frame its pane sends.
+    static LAST_PANIC: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Panics go to the log, since stderr is null, and are kept for the pane
+/// thread to pass on. Only in the real server: tests keep the default hook.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let what = format!("{} panicked: {info}", thread.name().unwrap_or("a thread"));
+        log(&what);
+        LAST_PANIC.with(|p| *p.borrow_mut() = Some(what));
+    }));
+}
+
+fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
+    LAST_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_else(|| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        format!("pane thread panicked: {message}")
+    })
 }
 
 /// What a connection thread (or the shutdown) tells a pane thread.
@@ -340,7 +375,13 @@ fn spawn_pane(
     std::thread::Builder::new()
         .name(format!("pane {id}"))
         .spawn(move || {
-            pane.run();
+            let mut pane = pane;
+            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pane.run()))
+                .unwrap_or_else(|payload| Some(panic_reason(&*payload)));
+            if let Some(reason) = failure {
+                log(format!("{id}: ended: {reason}"));
+                pane.fail(reason);
+            }
             server.remove_pane(&id);
         })?;
     Ok(pid)
@@ -412,13 +453,15 @@ struct Pane {
 }
 
 impl Pane {
-    fn run(mut self) {
+    /// The pane's life. `Some(reason)` when it ended on an error rather
+    /// than the shell's exit, for `fail` to pass on.
+    fn run(&mut self) -> Option<String> {
         let poll_opts = PollMode::Level;
         let mut interest = PollingEvent::readable(PTY_READ_WRITE_TOKEN);
         if let Err(e) = unsafe { self.pty.register(&self.poller, interest, poll_opts) } {
-            log(format!("{}: pty registration failed: {e}", self.id));
-            return;
+            return Some(format!("pty registration failed: {e}"));
         }
+        let mut failure = None;
         let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
         let mut buf = vec![0u8; READ_BUFFER_SIZE];
         let mut hung_up = false;
@@ -430,7 +473,7 @@ impl Pane {
                 if e.kind() == ErrorKind::Interrupted {
                     continue;
                 }
-                log(format!("{}: poll failed: {e}", self.id));
+                failure = Some(format!("poll failed: {e}"));
                 break;
             }
 
@@ -476,7 +519,7 @@ impl Pane {
                                 self.hang_up(&mut hung_up);
                                 continue;
                             }
-                            log(format!("{}: pty read failed: {e}", self.id));
+                            failure = Some(format!("pty read failed: {e}"));
                             break 'pane;
                         }
                         if event.writable
@@ -486,7 +529,7 @@ impl Pane {
                                 self.hang_up(&mut hung_up);
                                 continue;
                             }
-                            log(format!("{}: pty write failed: {e}", self.id));
+                            failure = Some(format!("pty write failed: {e}"));
                             break 'pane;
                         }
                     }
@@ -494,6 +537,16 @@ impl Pane {
                         if (event.readable || event.is_interrupt())
                             && let Err(e) = self.stream_read(&mut buf)
                         {
+                            if e.kind() == ErrorKind::InvalidData {
+                                // A frame we can't read: the stream is garbage
+                                // from here on. Say so before hanging up.
+                                let reason = format!("bad frame from the app: {e}");
+                                log(format!("{}: {reason}", self.id));
+                                self.send_last(Frame::Failed(reason));
+                                if !self.persist {
+                                    end_child(self.pid as i32, || {});
+                                }
+                            }
                             self.detach(Some(e));
                             continue;
                         }
@@ -512,7 +565,7 @@ impl Pane {
             if !hung_up && needs_write != interest.writable {
                 interest.writable = needs_write;
                 if let Err(e) = self.pty.reregister(&self.poller, interest, poll_opts) {
-                    log(format!("{}: pty reregistration failed: {e}", self.id));
+                    failure = Some(format!("pty reregistration failed: {e}"));
                     break;
                 }
             }
@@ -530,10 +583,38 @@ impl Pane {
         }
 
         let _ = self.pty.deregister(&self.poller);
-        if let Some(attached) = self.attached.take() {
-            let _ = self.poller.delete(&attached.stream);
+        // An attach that lost the race with the shell's exit was handed to
+        // this thread after it stopped reading messages: answer it rather
+        // than drop the socket, which the GUI would take for a dead server.
+        while let Ok(msg) = self.rx.try_recv() {
+            if let PaneMsg::Attach(mut stream) = msg {
+                let _ = remote::write_json(
+                    &mut stream,
+                    &Response::Err {
+                        message: format!("session {} ended before the attach", self.id),
+                    },
+                );
+            }
         }
-        // `self.pty` drops here: it waits on the child, which has exited.
+        // The pane's `Pty` drops with the pane, after `fail` has had its say:
+        // it waits on the child, which has exited (or is ended then).
+        failure
+    }
+
+    /// The pane ended on an error: tell the GUI why, if one is attached, and
+    /// any GUI still waiting to attach.
+    fn fail(&mut self, reason: String) {
+        self.send_last(Frame::Failed(reason.clone()));
+        while let Ok(msg) = self.rx.try_recv() {
+            if let PaneMsg::Attach(mut stream) = msg {
+                let _ = remote::write_json(
+                    &mut stream,
+                    &Response::Err {
+                        message: format!("session {} ended: {reason}", self.id),
+                    },
+                );
+            }
+        }
     }
 
     /// The shell hung up: take the master out of the poller (level-triggered,
@@ -590,7 +671,7 @@ impl Pane {
                 Frame::Input(_) => {}
                 Frame::Resize(size) => resize_pty(&self.pty, size),
                 // Only the server sends these.
-                Frame::Replay(_) | Frame::Output(_) | Frame::Exited(_) => {}
+                Frame::Replay(_) | Frame::Output(_) | Frame::Exited(_) | Frame::Failed(_) => {}
             }
         }
         Ok(())
@@ -673,7 +754,14 @@ impl Pane {
 
     /// Best effort, synchronously: the pane is about to go.
     fn send_exit(&mut self, raw: i32) {
+        self.send_last(Frame::Exited(raw));
+    }
+
+    /// The last frame to an attached GUI, after whatever output was still
+    /// queued; the socket closes after it.
+    fn send_last(&mut self, last: Frame) {
         if let Some(mut attached) = self.attached.take() {
+            self.attached_flag.store(false, Ordering::SeqCst);
             let _ = self.poller.delete(&attached.stream);
             let _ = attached.stream.set_nonblocking(false);
             let _ = attached
@@ -685,9 +773,7 @@ impl Pane {
                     return;
                 }
             }
-            let _ = attached
-                .stream
-                .write_all(&remote::encode(&Frame::Exited(raw)));
+            let _ = attached.stream.write_all(&remote::encode(&last));
         }
     }
 }

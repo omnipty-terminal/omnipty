@@ -162,6 +162,7 @@ fn main() {
         // The session server: no window, no config, no crash reporting of
         // its own. Exits by itself once it has nothing left to serve.
         Ok(cli::Parsed::Server) => {
+            server::install_panic_hook();
             let result = server::run(
                 &terminal::remote::endpoint(),
                 &terminal::remote::lock_path(),

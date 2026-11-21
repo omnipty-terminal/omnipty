@@ -19,6 +19,12 @@ write for users: what changed and why it matters, not which files moved.
   line to the right, out of line with its background colours. Braille
   graphics drifted further with every character and could run off the edge
   of the pane. Every character now sits in its own cell.
+- **Typing `exit` closes the pane again.** When a shell ended on its own,
+  OmniPTY sometimes missed its exit status and its last lines of output, so
+  the pane stayed open showing a hangup instead of closing, and a crash
+  report blamed the session server. The status and the output now always
+  come through. If the session server does have to end a pane, the crash
+  report now says why.
 
 ## [0.10.0] - 2026-11-17
 
